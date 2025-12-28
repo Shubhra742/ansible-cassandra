@@ -1,0 +1,112 @@
+---
+# snapshot.yml
+# Ansible Playbook to take Cassandra snapshots across all nodes
+
+# PLAY 1: Take Cassandra Snapshots
+- name: Take Cassandra Snapshot
+  hosts: cassandra_nodes              # Run on all nodes in cassandra_nodes group
+  become: yes                          # Use sudo privileges
+  gather_facts: yes                    # Collect system information
+  
+  vars:
+    # Variables you can customize
+    snapshot_name: "snapshot_{{ ansible_date_time.date }}_{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}"
+    keyspace: ""                       # Leave empty for all keyspaces, or specify one like "mykeyspace"
+    
+  tasks:
+    # TASK 1: Display what we're doing
+    - name: Display snapshot information
+      debug:
+        msg: 
+          - "============================================"
+          - "Taking Cassandra Snapshot"
+          - "Node: {{ inventory_hostname }}"
+          - "IP: {{ ansible_host }}"
+          - "Snapshot Name: {{ snapshot_name }}"
+          - "Keyspace: {{ keyspace if keyspace else 'ALL' }}"
+          - "============================================"
+    
+    # TASK 2: Check if Cassandra is running
+    - name: Check Cassandra service status
+      systemd:
+        name: cassandra
+        state: started
+      register: cassandra_status
+      failed_when: false
+    
+    # TASK 3: Display service status
+    - name: Display Cassandra status
+      debug:
+        msg: "Cassandra is {{ cassandra_status.status.ActiveState }}"
+    
+    # TASK 4: Take snapshot of all keyspaces
+    - name: Take snapshot of all keyspaces
+      shell: nodetool snapshot -t {{ snapshot_name }}
+      register: snapshot_result
+      when: keyspace == ""
+      
+    # TASK 5: Take snapshot of specific keyspace
+    - name: Take snapshot of specific keyspace
+      shell: nodetool snapshot -t {{ snapshot_name }} {{ keyspace }}
+      register: snapshot_result_keyspace
+      when: keyspace != ""
+    
+    # TASK 6: Display snapshot result
+    - name: Display snapshot result
+      debug:
+        var: snapshot_result.stdout_lines
+      when: keyspace == ""
+    
+    - name: Display keyspace snapshot result
+      debug:
+        var: snapshot_result_keyspace.stdout_lines
+      when: keyspace != ""
+    
+    # TASK 7: List snapshots
+    - name: List all snapshots
+      shell: nodetool listsnapshots
+      register: list_snapshots
+      
+    - name: Display all snapshots
+      debug:
+        var: list_snapshots.stdout_lines
+    
+    # TASK 8: Get snapshot location
+    - name: Find snapshot directories
+      shell: |
+        find /var/lib/cassandra/data -type d -name "{{ snapshot_name }}" 2>/dev/null || echo "No snapshots found"
+      register: snapshot_dirs
+      
+    - name: Display snapshot locations
+      debug:
+        msg: 
+          - "Snapshot saved in:"
+          - "{{ snapshot_dirs.stdout_lines }}"
+    
+    # TASK 9: Get snapshot size
+    - name: Calculate snapshot size
+      shell: |
+        du -sh /var/lib/cassandra/data/*/*/snapshots/{{ snapshot_name }} 2>/dev/null | awk '{sum+=$1} END {print sum}'
+      register: snapshot_size
+      failed_when: false
+      
+    - name: Display snapshot size
+      debug:
+        msg: "Total snapshot size: {{ snapshot_size.stdout if snapshot_size.stdout else 'Unable to calculate' }}"
+    
+    # TASK 10: Summary
+    - name: Display completion message
+      debug:
+        msg:
+          - "=========================================="
+          - "✓ Snapshot completed successfully!"
+          - "Node: {{ inventory_hostname }}"
+          - "Snapshot Name: {{ snapshot_name }}"
+          - "=========================================="
+          - ""
+          - "To restore this snapshot, use:"
+          - "nodetool refresh -- <keyspace> <table>"
+          - ""
+          - "To delete this snapshot, use:"
+          - "nodetool clearsnapshot -t {{ snapshot_name }}"
+          - "=========================================="

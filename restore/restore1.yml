@@ -1,0 +1,238 @@
+---
+# restore.yml
+# Simple Cassandra Snapshot Restore - All Scenarios
+# Usage:
+# Single table:  ansible-playbook -i inventory.ini restore.yml -e "snapshot_name=snapshot_2025-12-25_1631 keyspace=demo table_name=users"
+# Full keyspace: ansible-playbook -i inventory.ini restore.yml -e "snapshot_name=snapshot_2025-12-25_1631 keyspace=demo"
+# All keyspaces: ansible-playbook -i inventory.ini restore.yml -e "snapshot_name=snapshot_2025-12-25_1631 restore_all_keyspaces=true"
+
+- name: Cassandra Snapshot Restore
+  hosts: cassandra_nodes
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    snapshot_name: ""
+    keyspace: ""
+    table_name: ""
+    restore_all_keyspaces: false
+    recreate_schema: true
+    cassandra_data_dir: "/var/lib/cassandra/data"
+    replication_strategy: "{'class': 'SimpleStrategy', 'replication_factor': 1}"
+    system_keyspaces:
+      - system
+      - system_auth
+      - system_distributed
+      - system_schema
+      - system_traces
+  
+  tasks:
+    - name: "Validate snapshot_name"
+      fail:
+        msg: "ERROR: snapshot_name is required!"
+      when: snapshot_name == ""
+    
+    - name: "Validate scenario"
+      fail:
+        msg: "ERROR: Set either 'keyspace' OR 'restore_all_keyspaces=true'"
+      when: 
+        - keyspace == ""
+        - not restore_all_keyspaces
+    
+    - name: "Display configuration"
+      debug:
+        msg:
+          - "==============================================="
+          - "CASSANDRA SNAPSHOT RESTORE"
+          - "==============================================="
+          - "Node:     {{ inventory_hostname }}"
+          - "Snapshot: {{ snapshot_name }}"
+          - "Mode:     {% if restore_all_keyspaces %}ALL KEYSPACES{% elif table_name != '' %}SINGLE TABLE{% else %}FULL KEYSPACE{% endif %}"
+          - "{% if not restore_all_keyspaces %}Keyspace: {{ keyspace }}{% endif %}"
+          - "{% if table_name != '' %}Table:    {{ table_name }}{% endif %}"
+          - "==============================================="
+    
+    - name: "Find all snapshots"
+      find:
+        paths: "{{ cassandra_data_dir }}"
+        patterns: "{{ snapshot_name }}"
+        recurse: yes
+        file_type: directory
+      register: all_snapshots
+    
+    - name: "Verify snapshots exist"
+      fail:
+        msg: "ERROR: No snapshots found with name '{{ snapshot_name }}'"
+      when: all_snapshots.matched == 0
+    
+    - name: "Found snapshots"
+      debug:
+        msg: "Found {{ all_snapshots.matched }} snapshot(s)"
+    
+    # SCENARIO 1: Single Table Restore
+    - name: "Single Table - Filter snapshot"
+      set_fact:
+        table_snapshots: "{{ all_snapshots.files | selectattr('path', 'search', '/' + keyspace + '/' + table_name + '-') | list }}"
+      when: 
+        - not restore_all_keyspaces
+        - table_name != ""
+    
+    - name: "Single Table - Validate"
+      fail:
+        msg: "ERROR: Snapshot not found for {{ keyspace }}.{{ table_name }}"
+      when:
+        - not restore_all_keyspaces
+        - table_name != ""
+        - table_snapshots | length == 0
+    
+    - name: "Single Table - Restore"
+      when:
+        - not restore_all_keyspaces
+        - table_name != ""
+      block:
+        - name: "Get snapshot path"
+          set_fact:
+            snapshot_path: "{{ table_snapshots[0].path }}"
+        
+        - name: "Check schema file"
+          stat:
+            path: "{{ snapshot_path }}/schema.cql"
+          register: schema_check
+        
+        - name: "Read schema"
+          slurp:
+            src: "{{ snapshot_path }}/schema.cql"
+          register: schema_content
+          when: 
+            - schema_check.stat.exists
+            - recreate_schema
+        
+        - name: "Create keyspace"
+          shell: |
+            cqlsh -e "CREATE KEYSPACE IF NOT EXISTS {{ keyspace }} WITH replication = {{ replication_strategy }};"
+          when: recreate_schema
+          ignore_errors: yes
+        
+        - name: "Create table"
+          shell: |
+            echo "{{ schema_content.content | b64decode }}" | cqlsh
+          when:
+            - recreate_schema
+            - schema_content.content is defined
+          ignore_errors: yes
+        
+        - name: "Get table directory"
+          shell: dirname $(dirname "{{ snapshot_path }}")
+          register: table_dir
+        
+        - name: "Copy SSTable files"
+          shell: |
+            cp -f "{{ snapshot_path }}"/*.db "{{ table_dir.stdout }}/" 2>/dev/null || true
+            chown cassandra:cassandra "{{ table_dir.stdout }}"/*.db 2>/dev/null || true
+        
+        - name: "Refresh table"
+          shell: nodetool refresh {{ keyspace }} {{ table_name }}
+          ignore_errors: yes
+        
+        - name: "Verify row count"
+          shell: |
+            cqlsh -e "SELECT COUNT(*) FROM {{ keyspace }}.{{ table_name }};" | grep -v "count" | grep -v "^$" | grep -v "-" | tail -1
+          register: row_count
+          ignore_errors: yes
+        
+        - name: "Display result"
+          debug:
+            msg: "✓ Restored {{ keyspace }}.{{ table_name }} - {{ row_count.stdout | default('unknown') }} rows"
+    
+    # SCENARIO 2: Full Keyspace Restore
+    - name: "Full Keyspace - Filter snapshots"
+      set_fact:
+        keyspace_snapshots: "{{ all_snapshots.files | selectattr('path', 'search', '/' + keyspace + '/') | list }}"
+      when:
+        - not restore_all_keyspaces
+        - table_name == ""
+        - keyspace != ""
+    
+    - name: "Full Keyspace - Validate"
+      fail:
+        msg: "ERROR: No snapshots found for keyspace {{ keyspace }}"
+      when:
+        - not restore_all_keyspaces
+        - table_name == ""
+        - keyspace != ""
+        - keyspace_snapshots | length == 0
+    
+    - name: "Full Keyspace - Info"
+      debug:
+        msg: "Will restore {{ keyspace_snapshots | length }} table(s)"
+      when:
+        - not restore_all_keyspaces
+        - table_name == ""
+    
+    - name: "Full Keyspace - Create keyspace"
+      shell: |
+        cqlsh -e "CREATE KEYSPACE IF NOT EXISTS {{ keyspace }} WITH replication = {{ replication_strategy }};"
+      when:
+        - not restore_all_keyspaces
+        - table_name == ""
+        - recreate_schema
+      ignore_errors: yes
+    
+    - name: "Full Keyspace - Restore tables"
+      when:
+        - not restore_all_keyspaces
+        - table_name == ""
+      block:
+        - name: "Restore each table"
+          include_tasks: tasks/restore_single_table.yml
+          loop: "{{ keyspace_snapshots }}"
+          vars:
+            snapshot_path: "{{ item.path }}"
+            ks_name: "{{ keyspace }}"
+            tbl_name: "{{ item.path.split('/')[-3].split('-')[0] }}"
+    
+    # SCENARIO 3: All Keyspaces Restore
+    - name: "All Keyspaces - Extract keyspace names"
+      set_fact:
+        all_keyspaces_raw: "{{ all_snapshots.files | map('regex_search', cassandra_data_dir + '/([^/]+)/', '\\1') | select('string') | map('first') | list }}"
+      when: restore_all_keyspaces
+    
+    - name: "All Keyspaces - Filter system keyspaces"
+      set_fact:
+        user_keyspaces: "{{ all_keyspaces_raw | unique | difference(system_keyspaces) }}"
+      when: restore_all_keyspaces
+    
+    - name: "All Keyspaces - Info"
+      debug:
+        msg: "Will restore {{ user_keyspaces | length }} keyspace(s): {{ user_keyspaces | join(', ') }}"
+      when: restore_all_keyspaces
+    
+    - name: "All Keyspaces - Restore each"
+      include_tasks: tasks/restore_full_keyspace.yml
+      loop: "{{ user_keyspaces }}"
+      vars:
+        current_keyspace: "{{ item }}"
+      when: restore_all_keyspaces
+    
+    # Verification
+    - name: "Check node status"
+      shell: nodetool status | grep UN
+      register: node_check
+      failed_when: false
+    
+    - name: "Success message"
+      debug:
+        msg:
+          - ""
+          - "==============================================="
+          - "✓ RESTORE COMPLETED SUCCESSFULLY!"
+          - "==============================================="
+          - "Node:     {{ inventory_hostname }}"
+          - "Snapshot: {{ snapshot_name }}"
+          - "{% if restore_all_keyspaces %}Restored: ALL KEYSPACES{% elif table_name != '' %}Restored: {{ keyspace }}.{{ table_name }}{% else %}Restored: {{ keyspace }} (all tables){% endif %}"
+          - "==============================================="
+          - ""
+          - "Verify: cqlsh -e 'SELECT COUNT(*) FROM {{ keyspace }}.{{ table_name if table_name else 'your_table' }};'"
+          - "Repair: nodetool repair {{ keyspace if keyspace else '' }}"
+          - "Cleanup: nodetool clearsnapshot -t {{ snapshot_name }}"
+          - ""

@@ -1,0 +1,83 @@
+---
+# generate_node_cert.yml
+# Individual node certificate generation (matches tested manual process)
+# Place this file in the same directory as the main playbook
+
+- name: "Node {{ node_index + 1 }} ({{ node_ip }}) - Display generation start"
+  debug:
+    msg: "Generating certificate for Node {{ node_index + 1 }}: {{ node_ip }}"
+
+- name: "Node {{ node_index + 1 }} ({{ node_ip }}) - Generate private key"
+  shell: |
+    openssl genrsa -out {{ cert_workspace }}/node{{ node_index + 1 }}.key 2048
+  args:
+    creates: "{{ cert_workspace }}/node{{ node_index + 1 }}.key"
+
+- name: "Node {{ node_index + 1 }} ({{ node_ip }}) - Generate Certificate Signing Request"
+  shell: |
+    openssl req -new \
+      -key {{ cert_workspace }}/node{{ node_index + 1 }}.key \
+      -out {{ cert_workspace }}/node{{ node_index + 1 }}.csr \
+      -subj "/C={{ cert_country }}/ST={{ cert_state }}/L={{ cert_location }}/O={{ cert_org }}/CN={{ node_ip }}"
+  args:
+    creates: "{{ cert_workspace }}/node{{ node_index + 1 }}.csr"
+
+- name: "Node {{ node_index + 1 }} ({{ node_ip }}) - Sign certificate with Root CA"
+  shell: |
+    openssl x509 -req \
+      -in {{ cert_workspace }}/node{{ node_index + 1 }}.csr \
+      -CA {{ cert_workspace }}/rootCA.crt \
+      -CAkey {{ cert_workspace }}/rootCA.key \
+      -CAcreateserial \
+      -out {{ cert_workspace }}/node{{ node_index + 1 }}.crt \
+      -days {{ node_cert_validity_days }} \
+      -sha256
+  args:
+    creates: "{{ cert_workspace }}/node{{ node_index + 1 }}.crt"
+
+- name: "Node {{ node_index + 1 }} ({{ node_ip }}) - Verify certificate"
+  shell: |
+    openssl x509 -in {{ cert_workspace }}/node{{ node_index + 1 }}.crt -noout -subject -issuer -dates
+  register: cert_verify
+  changed_when: false
+
+- name: "Node {{ node_index + 1 }} ({{ node_ip }}) - Display certificate info"
+  debug:
+    var: cert_verify.stdout_lines
+
+- name: "Node {{ node_index + 1 }} ({{ node_ip }}) - Convert to PKCS12 format"
+  shell: |
+    openssl pkcs12 -export \
+      -in {{ cert_workspace }}/node{{ node_index + 1 }}.crt \
+      -inkey {{ cert_workspace }}/node{{ node_index + 1 }}.key \
+      -out {{ cert_workspace }}/node{{ node_index + 1 }}.p12 \
+      -name "node{{ node_index + 1 }}" \
+      -CAfile {{ cert_workspace }}/rootCA.crt \
+      -caname root \
+      -password pass:{{ cert_password }}
+  args:
+    creates: "{{ cert_workspace }}/node{{ node_index + 1 }}.p12"
+
+- name: "Node {{ node_index + 1 }} ({{ node_ip }}) - Create JKS keystore"
+  shell: |
+    keytool -importkeystore \
+      -deststorepass {{ cert_password }} \
+      -destkeypass {{ cert_password }} \
+      -destkeystore {{ cert_workspace }}/keystore_node{{ node_index + 1 }}.jks \
+      -srckeystore {{ cert_workspace }}/node{{ node_index + 1 }}.p12 \
+      -srcstoretype PKCS12 \
+      -srcstorepass {{ cert_password }} \
+      -alias node{{ node_index + 1 }}
+  args:
+    creates: "{{ cert_workspace }}/keystore_node{{ node_index + 1 }}.jks"
+
+- name: "Node {{ node_index + 1 }} ({{ node_ip }}) - Verify keystore"
+  shell: |
+    keytool -list -keystore {{ cert_workspace }}/keystore_node{{ node_index + 1 }}.jks \
+      -storepass {{ cert_password }} | grep "Your keystore contains"
+  register: keystore_verify
+  changed_when: false
+
+- name: "Node {{ node_index + 1 }} ({{ node_ip }}) - Display keystore info"
+  debug:
+    msg: "✓ Keystore created for {{ node_ip }} (Node {{ node_index + 1 }})"

@@ -1,0 +1,311 @@
+---
+- name: Install and Configure Multi-Node Cassandra Cluster
+  hosts: cassandra_nodes
+  become: yes
+  vars:
+    cassandra_version: "41x"
+    keyring_path: "/etc/apt/keyrings"
+    cassandra_key_url: "https://downloads.apache.org/cassandra/KEYS"
+    cassandra_repo: "deb [signed-by=/etc/apt/keyrings/apache-cassandra.asc] https://debian.cassandra.apache.org 41x main"
+    cluster_name: "MyCluster"
+    # Seed node will be the first node in cassandra_seeds group
+    
+  tasks:
+    # ============================================
+    # PART 1: INSTALL CASSANDRA
+    # ============================================
+    
+    - name: Kill any running apt/dpkg processes
+      shell: |
+        killall apt apt-get dpkg 2>/dev/null || true
+        sleep 2
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Remove apt locks
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/dpkg/lock
+        - /var/lib/dpkg/lock-frontend
+        - /var/lib/apt/lists/lock
+        - /var/cache/apt/archives/lock
+      ignore_errors: yes
+
+    - name: Configure any unconfigured packages
+      shell: dpkg --configure -a
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Clean apt cache completely
+      shell: |
+        apt-get clean
+        rm -rf /var/lib/apt/lists/*
+        mkdir -p /var/lib/apt/lists/partial
+      changed_when: false
+
+    - name: Force apt-get update
+      shell: apt-get update -y 2>&1
+      register: forced_update
+      changed_when: false
+      failed_when: false
+
+    - name: Install required packages
+      shell: apt-get install -y curl gnupg apt-transport-https openjdk-11-jdk
+      register: pkg_install
+      retries: 3
+      delay: 5
+      until: pkg_install.rc == 0
+
+    - name: Create keyrings directory
+      file:
+        path: "{{ keyring_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Download Apache Cassandra repository key
+      get_url:
+        url: "{{ cassandra_key_url }}"
+        dest: "{{ keyring_path }}/apache-cassandra.asc"
+        mode: '0644'
+        force: yes
+      retries: 3
+      delay: 5
+
+    - name: Add Cassandra APT repository
+      lineinfile:
+        path: /etc/apt/sources.list.d/cassandra.sources.list
+        line: "{{ cassandra_repo }}"
+        create: yes
+        mode: '0644'
+
+    - name: Update apt cache with Cassandra repository
+      shell: apt-get update -y
+      register: apt_update_cassandra
+      retries: 3
+      delay: 5
+      until: apt_update_cassandra.rc == 0
+      failed_when: false
+
+    - name: Install Apache Cassandra
+      shell: apt-get install -y cassandra
+      retries: 3
+      delay: 5
+      register: cassandra_install
+
+    # ============================================
+    # PART 2: CONFIGURE CASSANDRA CLUSTER
+    # ============================================
+    
+    - name: Stop Cassandra service for configuration
+      systemd:
+        name: cassandra
+        state: stopped
+      ignore_errors: yes
+
+    - name: Get current node IP address
+      set_fact:
+        node_ip: "{{ ansible_default_ipv4.address }}"
+
+    - name: Get seed node IPs
+      set_fact:
+        seed_ips: "{{ groups['cassandra_seeds'] | map('extract', hostvars, ['ansible_default_ipv4', 'address']) | join(',') }}"
+
+    - name: Display cluster configuration
+      debug:
+        msg:
+          - "Node IP: {{ node_ip }}"
+          - "Seed IPs: {{ seed_ips }}"
+          - "Cluster Name: {{ cluster_name }}"
+
+    - name: Backup original cassandra.yaml
+      copy:
+        src: /etc/cassandra/cassandra.yaml
+        dest: /etc/cassandra/cassandra.yaml.backup
+        remote_src: yes
+      ignore_errors: yes
+
+    - name: Configure Cassandra cluster settings
+      lineinfile:
+        path: /etc/cassandra/cassandra.yaml
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        backup: yes
+      loop:
+        - { regexp: '^cluster_name:', line: "cluster_name: '{{ cluster_name }}'" }
+        - { regexp: '^listen_address:', line: "listen_address: {{ node_ip }}" }
+        - { regexp: '^rpc_address:', line: "rpc_address: 0.0.0.0" }
+        - { regexp: '^# broadcast_rpc_address:', line: "broadcast_rpc_address: {{ node_ip }}" }
+        - { regexp: '^broadcast_rpc_address:', line: "broadcast_rpc_address: {{ node_ip }}" }
+        - { regexp: '^endpoint_snitch:', line: "endpoint_snitch: GossipingPropertyFileSnitch" }
+
+    - name: Configure seed providers
+      replace:
+        path: /etc/cassandra/cassandra.yaml
+        regexp: '- seeds: "127\.0\.0\.1:7000"'
+        replace: '- seeds: "{{ seed_ips }}"'
+        backup: yes
+
+    - name: Clear Cassandra data directories (fresh start)
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/cassandra/data
+        - /var/lib/cassandra/commitlog
+        - /var/lib/cassandra/saved_caches
+        - /var/lib/cassandra/hints
+
+    - name: Recreate Cassandra directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: cassandra
+        group: cassandra
+        mode: '0755'
+      loop:
+        - /var/lib/cassandra/data
+        - /var/lib/cassandra/commitlog
+        - /var/lib/cassandra/saved_caches
+        - /var/lib/cassandra/hints
+
+    - name: Ensure proper permissions
+      file:
+        path: "{{ item }}"
+        owner: cassandra
+        group: cassandra
+        recurse: yes
+      loop:
+        - /var/lib/cassandra
+        - /var/log/cassandra
+        - /etc/cassandra
+
+    # ============================================
+    # PART 3: START CASSANDRA CLUSTER
+    # ============================================
+
+- name: Start Seed Nodes First
+  hosts: cassandra_seeds
+  become: yes
+  serial: 1
+  tasks:
+    - name: Enable Cassandra service
+      systemd:
+        name: cassandra
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Start Cassandra on seed node
+      systemd:
+        name: cassandra
+        state: started
+
+    - name: Wait for seed node to be ready
+      wait_for:
+        port: 9042
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 15
+        timeout: 300
+      ignore_errors: yes
+
+    - name: Check if Cassandra process is running
+      shell: ps aux | grep -i cassandra | grep -v grep
+      register: cassandra_process
+      ignore_errors: yes
+
+    - name: Display seed node status
+      debug:
+        msg:
+          - "Seed node {{ ansible_default_ipv4.address }} started"
+          - "Process running: {{ 'Yes' if cassandra_process.rc == 0 else 'No' }}"
+
+    - name: Pause to let seed node stabilize
+      pause:
+        seconds: 30
+
+- name: Start Non-Seed Nodes
+  hosts: cassandra_nodes:!cassandra_seeds
+  become: yes
+  serial: 1
+  tasks:
+    - name: Enable Cassandra service
+      systemd:
+        name: cassandra
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Start Cassandra on non-seed node
+      systemd:
+        name: cassandra
+        state: started
+
+    - name: Wait for non-seed node to join cluster
+      wait_for:
+        port: 9042
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 15
+        timeout: 300
+      ignore_errors: yes
+
+    - name: Pause to let node join cluster
+      pause:
+        seconds: 30
+
+# ============================================
+# PART 4: VERIFY CLUSTER
+# ============================================
+
+- name: Verify Cassandra Cluster
+  hosts: cassandra_seeds[0]
+  become: yes
+  vars:
+    cluster_name: "MyCluster"
+  tasks:
+    - name: Wait before checking cluster status
+      pause:
+        seconds: 10
+
+    - name: Check cluster status with nodetool
+      shell: nodetool status
+      register: nodetool_output
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display cluster status
+      debug:
+        var: nodetool_output.stdout_lines
+      when: nodetool_output.rc == 0
+
+    - name: Check datacenter information
+      shell: nodetool describecluster
+      register: describe_cluster
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display datacenter info
+      debug:
+        var: describe_cluster.stdout_lines
+      when: describe_cluster.rc == 0
+
+    - name: Display final summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Cassandra Cluster Setup Complete!"
+          - "=========================================="
+          - "Cluster Name: {{ cluster_name }}"
+          - "Seed Nodes: {{ groups['cassandra_seeds'] | map('extract', hostvars, ['ansible_default_ipv4', 'address']) | join(', ') }}"
+          - "All Nodes: {{ groups['cassandra_nodes'] | map('extract', hostvars, ['ansible_default_ipv4', 'address']) | join(', ') }}"
+          - ""
+          - "To verify cluster:"
+          - "  nodetool status"
+          - "  nodetool describecluster"
+          - ""
+          - "To connect with cqlsh:"
+          - "  cqlsh {{ groups['cassandra_seeds'][0] | extract(hostvars, ['ansible_default_ipv4', 'address']) }}"
+          - ""
+          - "Config files: /etc/cassandra/"
+          - "Logs: /var/log/cassandra/system.log"
+          - "Data directory: /var/lib/cassandra/"
+          - "=========================================="

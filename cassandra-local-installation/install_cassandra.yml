@@ -1,0 +1,130 @@
+---
+- name: Install Apache Cassandra 4.1.x on Ubuntu
+  hosts: localhost
+  connection: local
+  become: yes
+  vars:
+    cassandra_version: "41x"
+    keyring_path: "/etc/apt/keyrings"
+    cassandra_key_url: "https://downloads.apache.org/cassandra/KEYS"
+    cassandra_repo: "deb [signed-by=/etc/apt/keyrings/apache-cassandra.asc] https://debian.cassandra.apache.org 41x main"
+    
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - curl
+          - gnupg
+          - apt-transport-https
+        state: present
+        update_cache: yes
+      retries: 3
+      delay: 5
+      register: result
+      until: result is succeeded
+
+    - name: Create keyrings directory
+      file:
+        path: "{{ keyring_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Download Apache Cassandra repository key
+      get_url:
+        url: "{{ cassandra_key_url }}"
+        dest: "{{ keyring_path }}/apache-cassandra.asc"
+        mode: '0644'
+        force: yes
+      retries: 3
+      delay: 5
+
+    - name: Remove old Cassandra repository entries (if exist)
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/cassandra.list
+        - /etc/apt/sources.list.d/cassandra.sources.list
+
+    - name: Add Cassandra APT repository
+      lineinfile:
+        path: /etc/apt/sources.list.d/cassandra.sources.list
+        line: "{{ cassandra_repo }}"
+        create: yes
+        mode: '0644'
+
+    - name: Update apt cache with Cassandra repository
+      apt:
+        update_cache: yes
+        cache_valid_time: 0
+      retries: 3
+      delay: 5
+      register: apt_update
+      until: apt_update is succeeded
+
+    - name: Install Apache Cassandra
+      apt:
+        name: cassandra
+        state: present
+        update_cache: no
+      retries: 3
+      delay: 5
+
+    - name: Ensure Cassandra service is enabled
+      systemd:
+        name: cassandra
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Start Cassandra service
+      systemd:
+        name: cassandra
+        state: started
+      register: cassandra_start
+      ignore_errors: yes
+
+    - name: Wait for Cassandra to start (give it time to initialize)
+      wait_for:
+        port: 9042
+        delay: 10
+        timeout: 120
+      when: cassandra_start is succeeded
+
+    - name: Check Cassandra service status
+      systemd:
+        name: cassandra
+      register: cassandra_status
+
+    - name: Display Cassandra service status
+      debug:
+        msg: "Cassandra service is {{ cassandra_status.status.ActiveState }}"
+
+    - name: Verify Cassandra installation
+      command: nodetool status
+      register: nodetool_output
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display nodetool status
+      debug:
+        var: nodetool_output.stdout_lines
+      when: nodetool_output.rc == 0
+
+    - name: Display installation summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Cassandra Installation Complete!"
+          - "=========================================="
+          - "Config files: /etc/cassandra/"
+          - "Logs: /var/log/cassandra/"
+          - "Data directory: /var/lib/cassandra/"
+          - "JVM/Heap settings: /etc/default/cassandra"
+          - ""
+          - "Useful commands:"
+          - "  sudo service cassandra start"
+          - "  sudo service cassandra stop"
+          - "  sudo service cassandra restart"
+          - "  nodetool status"
+          - "  cqlsh (to connect to Cassandra)"
+          - "=========================================="

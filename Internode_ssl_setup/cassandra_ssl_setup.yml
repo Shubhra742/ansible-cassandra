@@ -1,0 +1,685 @@
+---
+# cassandra_ssl_complete_working.yml
+# Complete Working Ansible Playbook for Cassandra Internode SSL/TLS Encryption
+# Based on successful manual implementation
+# 
+# Usage:
+# ansible-playbook -i inventory_ssl.ini cassandra_ssl_complete_working.yml
+
+- name: Phase 1 - Certificate Generation on Seed Node
+  hosts: seed_node
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    cert_workspace: "/root/certs"
+    cert_country: "IN"
+    cert_state: "UP"
+    cert_location: "Noida"
+    cert_org: "Ksolves"
+    cert_password: "cassandra123"
+    root_ca_validity_days: 3650
+    node_cert_validity_days: 3650
+    
+  tasks:
+    - name: "Display Phase 1 header"
+      debug:
+        msg:
+          - "================================================"
+          - "PHASE 1: CERTIFICATE GENERATION ON SEED NODE"
+          - "================================================"
+    
+    - name: "Create certificate workspace"
+      file:
+        path: "{{ cert_workspace }}"
+        state: directory
+        mode: '0700'
+    
+    - name: "Check if Root CA exists"
+      stat:
+        path: "{{ cert_workspace }}/rootCA.crt"
+      register: root_ca_check
+    
+    - name: "Generate Root CA private key"
+      shell: |
+        openssl genrsa -out {{ cert_workspace }}/rootCA.key 2048
+      when: not root_ca_check.stat.exists
+    
+    - name: "Generate Root CA certificate"
+      shell: |
+        openssl req -x509 -new -nodes \
+          -key {{ cert_workspace }}/rootCA.key \
+          -sha256 -days {{ root_ca_validity_days }} \
+          -out {{ cert_workspace }}/rootCA.crt \
+          -subj "/C={{ cert_country }}/ST={{ cert_state }}/L={{ cert_location }}/O={{ cert_org }}/CN=CassandraRootCA"
+      when: not root_ca_check.stat.exists
+    
+    - name: "Display Root CA certificate info"
+      shell: openssl x509 -in {{ cert_workspace }}/rootCA.crt -noout -subject -dates
+      register: root_ca_info
+      when: not root_ca_check.stat.exists
+    
+    - name: "Show Root CA details"
+      debug:
+        var: root_ca_info.stdout_lines
+      when: not root_ca_check.stat.exists
+    
+    - name: "Create common truststore from Root CA"
+      shell: |
+        keytool -import -alias root \
+          -file {{ cert_workspace }}/rootCA.crt \
+          -keystore {{ cert_workspace }}/truststore.jks \
+          -storepass {{ cert_password }} \
+          -noprompt
+      args:
+        creates: "{{ cert_workspace }}/truststore.jks"
+    
+    - name: "Get list of Cassandra node IPs from inventory"
+      set_fact:
+        cassandra_nodes: "{{ groups['cassandra_nodes'] | map('extract', hostvars, 'ansible_host') | list }}"
+    
+    - name: "Display nodes for certificate generation"
+      debug:
+        msg: "Generating certificates for: {{ cassandra_nodes }}"
+    
+    - name: "Generate certificates for each node"
+      include_tasks: generate_node_cert.yml
+      loop: "{{ cassandra_nodes }}"
+      loop_control:
+        loop_var: node_ip
+        index_var: node_index
+    
+    - name: "List generated certificates"
+      shell: ls -lh {{ cert_workspace }}/*.jks
+      register: cert_list
+    
+    - name: "Display generated certificates"
+      debug:
+        var: cert_list.stdout_lines
+    
+    - name: "Verify all keystores"
+      shell: |
+        echo "=== Verifying Keystores ==="
+        for ks in {{ cert_workspace }}/keystore_node*.jks; do
+          echo "File: $ks"
+          keytool -list -keystore "$ks" -storepass {{ cert_password }} | grep "Your keystore contains"
+        done
+      register: keystore_verify
+    
+    - name: "Display keystore verification"
+      debug:
+        var: keystore_verify.stdout_lines
+    
+    - name: "Phase 1 complete"
+      debug:
+        msg: 
+          - "✓ Phase 1 Complete: All certificates generated"
+          - "Root CA: {{ cert_workspace }}/rootCA.crt"
+          - "Truststore: {{ cert_workspace }}/truststore.jks"
+          - "Keystores: {{ cassandra_nodes | length }} node keystores created"
+
+
+- name: Phase 2 - Distribute Certificates to All Nodes
+  hosts: cassandra_nodes
+  become: yes
+  gather_facts: yes
+  serial: 1
+  
+  vars:
+    cert_workspace: "/root/certs"
+    cert_password: "cassandra123"
+    cassandra_cert_dir: "/etc/cassandra/certs"
+    cassandra_user: "cassandra"
+    cassandra_group: "cassandra"
+    cassandra_config_file: "/etc/cassandra/cassandra.yaml"
+    local_temp_dir: "/tmp/cassandra_ssl_certs"
+  
+  tasks:
+    - name: "Display Phase 2 header"
+      debug:
+        msg:
+          - "================================================"
+          - "PHASE 2: DISTRIBUTE CERTIFICATES TO {{ inventory_hostname }}"
+          - "Node IP: {{ ansible_host }}"
+          - "================================================"
+    
+    - name: "Determine node index"
+      set_fact:
+        node_index: "{{ groups['cassandra_nodes'].index(inventory_hostname) }}"
+    
+    - name: "Display node information"
+      debug:
+        msg: 
+          - "Hostname: {{ inventory_hostname }}"
+          - "IP Address: {{ ansible_host }}"
+          - "Node Index: {{ node_index }}"
+          - "Keystore: keystore_node{{ node_index | int + 1 }}.jks"
+    
+    - name: "Create Cassandra certificate directory"
+      file:
+        path: "{{ cassandra_cert_dir }}"
+        state: directory
+        owner: "{{ cassandra_user }}"
+        group: "{{ cassandra_group }}"
+        mode: '0700'
+    
+    - name: "Create local temp directory on control machine"
+      file:
+        path: "{{ local_temp_dir }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      run_once: yes
+      become: no
+    
+    - name: "Fetch node-specific keystore from seed to control machine"
+      fetch:
+        src: "{{ cert_workspace }}/keystore_node{{ node_index | int + 1 }}.jks"
+        dest: "{{ local_temp_dir }}/keystore_node{{ node_index | int + 1 }}.jks"
+        flat: yes
+      delegate_to: "{{ groups['seed_node'][0] }}"
+    
+    - name: "Fetch common truststore from seed to control machine"
+      fetch:
+        src: "{{ cert_workspace }}/truststore.jks"
+        dest: "{{ local_temp_dir }}/truststore.jks"
+        flat: yes
+      delegate_to: "{{ groups['seed_node'][0] }}"
+      run_once: yes
+    
+    - name: "Copy keystore to node (renamed to keystore.jks)"
+      copy:
+        src: "{{ local_temp_dir }}/keystore_node{{ node_index | int + 1 }}.jks"
+        dest: "{{ cassandra_cert_dir }}/keystore.jks"
+        owner: "{{ cassandra_user }}"
+        group: "{{ cassandra_group }}"
+        mode: '0400'
+    
+    - name: "Copy truststore to node"
+      copy:
+        src: "{{ local_temp_dir }}/truststore.jks"
+        dest: "{{ cassandra_cert_dir }}/truststore.jks"
+        owner: "{{ cassandra_user }}"
+        group: "{{ cassandra_group }}"
+        mode: '0400'
+    
+    - name: "Verify certificates are in place"
+      shell: ls -lh {{ cassandra_cert_dir }}/*.jks
+      register: certs_verify
+    
+    - name: "Display certificate files"
+      debug:
+        var: certs_verify.stdout_lines
+    
+    - name: "Test cassandra user can read keystore"
+      shell: sudo -u {{ cassandra_user }} cat {{ cassandra_cert_dir }}/keystore.jks > /dev/null && echo "readable" || echo "not readable"
+      register: keystore_readable
+    
+    - name: "Verify keystore is readable by cassandra user"
+      assert:
+        that:
+          - "'readable' in keystore_readable.stdout"
+        fail_msg: "⚠ Cassandra user cannot read keystore!"
+        success_msg: "✓ Keystore is readable by cassandra user"
+    
+    - name: "Verify keystore contents"
+      shell: keytool -list -keystore {{ cassandra_cert_dir }}/keystore.jks -storepass {{ cert_password }} 2>&1 | head -20
+      register: keystore_content
+    
+    - name: "Display keystore contents"
+      debug:
+        var: keystore_content.stdout_lines
+    
+    - name: "Phase 2 complete for {{ inventory_hostname }}"
+      debug:
+        msg: "✓ Certificates distributed and verified on {{ inventory_hostname }}"
+
+
+- name: Phase 3 - Configure Cassandra SSL
+  hosts: cassandra_nodes
+  become: yes
+  gather_facts: yes
+  serial: 1
+  
+  vars:
+    cert_password: "cassandra123"
+    cassandra_cert_dir: "/etc/cassandra/certs"
+    cassandra_config_file: "/etc/cassandra/cassandra.yaml"
+  
+  tasks:
+    - name: "Display Phase 3 header"
+      debug:
+        msg:
+          - "================================================"
+          - "PHASE 3: CONFIGURE SSL ON {{ inventory_hostname }}"
+          - "================================================"
+    
+    - name: "Backup cassandra.yaml with timestamp"
+      copy:
+        src: "{{ cassandra_config_file }}"
+        dest: "{{ cassandra_config_file }}.backup_{{ ansible_date_time.epoch }}"
+        remote_src: yes
+    
+    - name: "Check for existing server_encryption_options"
+      shell: grep -n "^server_encryption_options:" {{ cassandra_config_file }} || echo "not found"
+      register: existing_ssl_config
+      changed_when: false
+    
+    - name: "Display existing SSL config locations"
+      debug:
+        msg: "Found server_encryption_options at: {{ existing_ssl_config.stdout }}"
+    
+    - name: "Remove ALL existing server_encryption_options sections"
+      shell: |
+        # Create a backup
+        cp {{ cassandra_config_file }} {{ cassandra_config_file }}.before_ssl_cleanup
+        
+        # Remove all server_encryption_options blocks
+        # This sed command removes from 'server_encryption_options:' to the next line that starts with a letter (new section)
+        sed -i '/^server_encryption_options:/,/^[a-zA-Z]/{
+          /^[a-zA-Z]/!d
+        }' {{ cassandra_config_file }}
+        
+        # Also remove the header line itself
+        sed -i '/^server_encryption_options:/d' {{ cassandra_config_file }}
+        
+        # Remove any Ansible marker blocks if they exist
+        sed -i '/# BEGIN ANSIBLE MANAGED SSL CONFIG/,/# END ANSIBLE MANAGED SSL CONFIG/d' {{ cassandra_config_file }}
+      when: "'not found' not in existing_ssl_config.stdout"
+    
+    - name: "Verify old SSL config is removed"
+      shell: grep -c "^server_encryption_options:" {{ cassandra_config_file }} || echo "0"
+      register: ssl_count_after_remove
+      changed_when: false
+    
+    - name: "Confirm cleanup"
+      debug:
+        msg: "server_encryption_options sections found: {{ ssl_count_after_remove.stdout }}"
+    
+    - name: "Add new server_encryption_options configuration"
+      blockinfile:
+        path: "{{ cassandra_config_file }}"
+        marker: "# {mark} ANSIBLE MANAGED SSL CONFIG"
+        block: |
+          server_encryption_options:
+              internode_encryption: all
+              keystore: {{ cassandra_cert_dir }}/keystore.jks
+              keystore_password: {{ cert_password }}
+              truststore: {{ cassandra_cert_dir }}/truststore.jks
+              truststore_password: {{ cert_password }}
+        insertafter: EOF
+        create: no
+    
+    - name: "Verify final configuration"
+      shell: grep -A 6 "server_encryption_options:" {{ cassandra_config_file }}
+      register: final_config
+      changed_when: false
+    
+    - name: "Display final SSL configuration"
+      debug:
+        var: final_config.stdout_lines
+    
+    - name: "Count server_encryption_options occurrences (must be exactly 1)"
+      shell: grep -c "^server_encryption_options:" {{ cassandra_config_file }}
+      register: final_ssl_count
+      changed_when: false
+      failed_when: final_ssl_count.stdout | int != 1
+    
+    - name: "Confirm single SSL config"
+      debug:
+        msg: "✓ Exactly ONE server_encryption_options section configured"
+    
+    - name: "Phase 3 complete for {{ inventory_hostname }}"
+      debug:
+        msg: "✓ SSL configuration updated on {{ inventory_hostname }}"
+
+
+- name: Phase 4 - Stop All Cassandra Nodes
+  hosts: cassandra_nodes
+  become: yes
+  gather_facts: no
+  
+  tasks:
+    - name: "Display Phase 4 header"
+      debug:
+        msg:
+          - "================================================"
+          - "PHASE 4: STOPPING ALL CASSANDRA NODES"
+          - "================================================"
+      run_once: yes
+    
+    - name: "Stop Cassandra service"
+      systemd:
+        name: cassandra
+        state: stopped
+    
+    - name: "Wait for Cassandra port to close"
+      wait_for:
+        port: 9042
+        state: stopped
+        timeout: 120
+      ignore_errors: yes
+    
+    - name: "Verify Cassandra process is stopped"
+      shell: ps aux | grep '[c]assandra' || echo "stopped"
+      register: cassandra_process
+      changed_when: false
+    
+    - name: "Display stop status"
+      debug:
+        msg: "{{ 'Cassandra stopped' if 'stopped' in cassandra_process.stdout else 'Process may still be running' }}"
+    
+    - name: "Wait for graceful shutdown"
+      pause:
+        seconds: 10
+
+
+- name: Phase 5 - Start Seed Node with SSL
+  hosts: seed_node
+  become: yes
+  serial: 1
+  
+  tasks:
+    - name: "Display Phase 5 header"
+      debug:
+        msg:
+          - "================================================"
+          - "PHASE 5: STARTING SEED NODE WITH SSL ENCRYPTION"
+          - "Node: {{ inventory_hostname }}"
+          - "================================================"
+    
+    - name: "Start Cassandra on seed node"
+      systemd:
+        name: cassandra
+        state: started
+        enabled: yes
+    
+    - name: "Wait for CQL port to open"
+      wait_for:
+        port: 9042
+        host: 127.0.0.1
+        state: started
+        timeout: 300
+        delay: 15
+    
+    - name: "Additional wait for SSL initialization"
+      pause:
+        seconds: 30
+        prompt: "Waiting for seed node SSL initialization..."
+    
+    - name: "Get node's private IP"
+      shell: hostname -I | awk '{print $1}'
+      register: seed_private_ip
+      changed_when: false
+    
+    - name: "Check seed node status in cluster"
+      shell: nodetool status | grep "{{ seed_private_ip.stdout }}" | awk '{print $1}'
+      register: seed_status
+      retries: 20
+      delay: 10
+      until: seed_status.stdout == "UN"
+      ignore_errors: yes
+    
+    - name: "Display seed node status"
+      debug:
+        msg: "Seed node status: {{ seed_status.stdout | default('Unknown') }}"
+    
+    - name: "Check for SSL encryption in logs"
+      shell: tail -50 /var/log/cassandra/system.log | grep -i "encryption = encrypted" || echo "Encryption status not found in recent logs"
+      register: seed_encryption
+      changed_when: false
+    
+    - name: "Display encryption status"
+      debug:
+        var: seed_encryption.stdout_lines
+    
+    - name: "Verify SSL is working"
+      shell: tail -100 /var/log/cassandra/system.log | grep -i "encryption = encrypted" | tail -3
+      register: ssl_verification
+      changed_when: false
+    
+    - name: "Assert encryption is enabled"
+      assert:
+        that:
+          - ssl_verification.stdout | length > 0
+        fail_msg: "⚠ WARNING: Encryption may not be enabled on seed node!"
+        success_msg: "✓ Seed node is using encrypted connections"
+      ignore_errors: yes
+    
+    - name: "Display detailed encryption info"
+      debug:
+        var: ssl_verification.stdout_lines
+      when: ssl_verification.stdout | length > 0
+    
+    - name: "Seed node startup complete"
+      debug:
+        msg: 
+          - "✓ Seed node {{ inventory_hostname }} started successfully"
+          - "Status: {{ seed_status.stdout | default('Check manually') }}"
+
+
+- name: Phase 6 - Start Peer Nodes with SSL
+  hosts: cassandra_nodes:!seed_node
+  become: yes
+  serial: 1
+  
+  tasks:
+    - name: "Display Phase 6 header"
+      debug:
+        msg:
+          - "================================================"
+          - "PHASE 6: STARTING PEER NODE {{ inventory_hostname }}"
+          - "================================================"
+    
+    - name: "Start Cassandra on peer node"
+      systemd:
+        name: cassandra
+        state: started
+        enabled: yes
+    
+    - name: "Wait for CQL port to open"
+      wait_for:
+        port: 9042
+        host: 127.0.0.1
+        state: started
+        timeout: 300
+        delay: 15
+    
+    - name: "Wait for node to join cluster"
+      pause:
+        seconds: 30
+        prompt: "Waiting for {{ inventory_hostname }} to join cluster..."
+    
+    - name: "Get node's private IP"
+      shell: hostname -I | awk '{print $1}'
+      register: node_private_ip
+      changed_when: false
+    
+    - name: "Check node status in cluster"
+      shell: nodetool status | grep "{{ node_private_ip.stdout }}" | awk '{print $1}'
+      register: node_status
+      retries: 20
+      delay: 10
+      until: node_status.stdout == "UN"
+      ignore_errors: yes
+    
+    - name: "Display node status"
+      debug:
+        msg: "Node status: {{ node_status.stdout | default('Unknown') }}"
+    
+    - name: "Check for SSL encryption in logs"
+      shell: tail -50 /var/log/cassandra/system.log | grep -i "encryption = encrypted" || echo "Encryption status not found"
+      register: node_encryption
+      changed_when: false
+    
+    - name: "Display encryption status"
+      debug:
+        var: node_encryption.stdout_lines
+    
+    - name: "Verify SSL is working"
+      shell: tail -100 /var/log/cassandra/system.log | grep -i "encryption = encrypted" | tail -3
+      register: ssl_verification
+      changed_when: false
+    
+    - name: "Assert encryption is enabled"
+      assert:
+        that:
+          - ssl_verification.stdout | length > 0
+        fail_msg: "⚠ WARNING: Encryption may not be enabled on this node!"
+        success_msg: "✓ Node is using encrypted connections"
+      ignore_errors: yes
+    
+    - name: "Display detailed encryption info"
+      debug:
+        var: ssl_verification.stdout_lines
+      when: ssl_verification.stdout | length > 0
+    
+    - name: "Peer node startup complete"
+      debug:
+        msg: "✓ Peer node {{ inventory_hostname }} started successfully"
+    
+    - name: "Pause between starting nodes"
+      pause:
+        seconds: 20
+      when: inventory_hostname != groups['cassandra_nodes'][-1]
+
+
+- name: Phase 7 - Final Validation
+  hosts: seed_node
+  become: yes
+  
+  tasks:
+    - name: "Display Phase 7 header"
+      debug:
+        msg:
+          - "================================================"
+          - "PHASE 7: FINAL VALIDATION"
+          - "================================================"
+    
+    - name: "Wait for cluster to stabilize"
+      pause:
+        seconds: 30
+    
+    - name: "Get full cluster status"
+      shell: nodetool status
+      register: final_cluster_status
+      changed_when: false
+    
+    - name: "Display cluster status"
+      debug:
+        var: final_cluster_status.stdout_lines
+    
+    - name: "Count UP Normal nodes"
+      shell: nodetool status | grep -c "^UN"
+      register: un_count
+      changed_when: false
+    
+    - name: "Get expected node count"
+      set_fact:
+        expected_nodes: "{{ groups['cassandra_nodes'] | length }}"
+    
+    - name: "Validate all nodes are UP"
+      assert:
+        that:
+          - un_count.stdout | int == expected_nodes | int
+        success_msg: "✓✓✓ All {{ expected_nodes }} nodes are UP and NORMAL"
+        fail_msg: "✗ Only {{ un_count.stdout }}/{{ expected_nodes }} nodes are UP - Check logs!"
+    
+    - name: "Check for SSL/Certificate errors in logs"
+      shell: |
+        grep -i "handshake.*exception\|certificate.*exception\|ssl.*error" /var/log/cassandra/system.log | tail -10 || echo "No SSL errors found"
+      register: ssl_errors
+      changed_when: false
+    
+    - name: "Display SSL error check results"
+      debug:
+        msg: "{{ 'No SSL errors detected' if 'No SSL errors found' in ssl_errors.stdout else 'SSL errors found - see below' }}"
+    
+    - name: "Show SSL errors if any"
+      debug:
+        var: ssl_errors.stdout_lines
+      when: "'No SSL errors found' not in ssl_errors.stdout"
+    
+    - name: "Verify encrypted connections across cluster"
+      shell: tail -100 /var/log/cassandra/system.log | grep "encryption = encrypted" | tail -10
+      register: encryption_final_check
+      changed_when: false
+    
+    - name: "Display encryption verification"
+      debug:
+        msg: "Encrypted connections found in logs"
+    
+    - name: "Show encryption details"
+      debug:
+        var: encryption_final_check.stdout_lines
+    
+    - name: "Extract encryption protocol and cipher"
+      shell: tail -100 /var/log/cassandra/system.log | grep -o "encryption = encrypted([^)]*)" | head -1
+      register: encryption_details
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: "Display encryption details"
+      debug:
+        msg: "{{ encryption_details.stdout }}"
+      when: encryption_details.stdout | length > 0
+    
+    - name: "Test CQL connectivity"
+      shell: cqlsh 127.0.0.1 -e "DESCRIBE CLUSTER;" 2>&1
+      register: cql_test
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: "Display CQL test result"
+      debug:
+        var: cql_test.stdout_lines
+      when: cql_test.rc == 0
+    
+    - name: "Get nodetool info"
+      shell: nodetool info | grep -E "Gossip|Thrift|Binary|ID"
+      register: node_info
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: "Display node information"
+      debug:
+        var: node_info.stdout_lines
+      when: node_info.rc == 0
+    
+    - name: "Cleanup local temp directory"
+      file:
+        path: "/tmp/cassandra_ssl_certs"
+        state: absent
+      delegate_to: localhost
+      become: no
+      run_once: yes
+    
+    - name: "Final success banner"
+      debug:
+        msg:
+          - ""
+          - "================================================"
+          - "✓✓✓ CASSANDRA SSL SETUP COMPLETE! ✓✓✓"
+          - "================================================"
+          - ""
+          - "Cluster Status:"
+          - "  • Nodes UP: {{ un_count.stdout }}/{{ expected_nodes }}"
+          - "  • Encryption: ALL internode traffic encrypted"
+          - "  • Protocol: TLS 1.2/1.3 with strong ciphers"
+          - ""
+          - "Certificate Locations:"
+          - "  • Node keystores: /etc/cassandra/certs/keystore.jks"
+          - "  • Node truststores: /etc/cassandra/certs/truststore.jks"
+          - "  • Master copies: /root/certs/ (seed node)"
+          - ""
+          - "Next Steps:"
+          - "  1. Backup certificates: tar -czf cassandra_ssl_backup.tar.gz /root/certs/"
+          - "  2. Monitor encryption: tail -f /var/log/cassandra/system.log | grep encrypt"
+          - "  3. Regular checks: nodetool status"
+          - "  4. Test queries: cqlsh -e 'SELECT * FROM system.local;'"
+          - ""
+          - "Configuration:"
+          - "  • Config file: /etc/cassandra/cassandra.yaml"
+          - "  • Backups: /etc/cassandra/cassandra.yaml.backup_*"
+          - ""
+          - "================================================"

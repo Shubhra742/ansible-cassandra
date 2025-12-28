@@ -1,0 +1,63 @@
+---
+# restore_keyspace_inline.yml
+# Helper task to restore a full keyspace
+
+- name: "Filter snapshots for keyspace {{ current_keyspace }}"
+  set_fact:
+    current_ks_snapshots: "{{ all_snapshots.files | selectattr('path', 'search', '/' + current_keyspace + '/') | list }}"
+
+- name: "Create keyspace {{ current_keyspace }}"
+  shell: |
+    cqlsh -e "CREATE KEYSPACE IF NOT EXISTS {{ current_keyspace }} WITH replication = {{ replication_strategy }};"
+  when: recreate_schema
+  ignore_errors: yes
+
+- name: "Info for {{ current_keyspace }}"
+  debug:
+    msg: "Restoring {{ current_ks_snapshots | length }} table(s) in keyspace {{ current_keyspace }}"
+
+- name: "Restore tables in {{ current_keyspace }}"
+  block:
+    - name: "Extract table info"
+      set_fact:
+        tbl_dir: "{{ item.path | dirname | dirname }}"
+        tbl_name: "{{ item.path.split('/')[-3].split('-')[0] }}"
+        snap_path: "{{ item.path }}"
+    
+    - name: "Check schema file"
+      stat:
+        path: "{{ snap_path }}/schema.cql"
+      register: tbl_schema_check
+    
+    - name: "Read schema"
+      slurp:
+        src: "{{ snap_path }}/schema.cql"
+      register: tbl_schema_content
+      when: 
+        - tbl_schema_check.stat.exists
+        - recreate_schema
+    
+    - name: "Create table {{ tbl_name }}"
+      shell: |
+        echo "{{ tbl_schema_content.content | b64decode }}" | cqlsh
+      when:
+        - recreate_schema
+        - tbl_schema_content.content is defined
+      ignore_errors: yes
+    
+    - name: "Copy SSTable files"
+      shell: |
+        cp -f "{{ snap_path }}"/*.db "{{ tbl_dir }}/" 2>/dev/null || true
+        chown cassandra:cassandra "{{ tbl_dir }}"/*.db 2>/dev/null || true
+    
+    - name: "Refresh table"
+      shell: nodetool refresh {{ current_keyspace }} {{ tbl_name }}
+      ignore_errors: yes
+    
+    - name: "Log restored table"
+      debug:
+        msg: "✓ Restored: {{ current_keyspace }}.{{ tbl_name }}"
+  
+  loop: "{{ current_ks_snapshots }}"
+  loop_control:
+    label: "{{ item.path.split('/')[-3].split('-')[0] }}"
