@@ -1,0 +1,112 @@
+---
+- name: Display setup information
+  ansible.builtin.debug:
+    msg: "Setting up JMX authentication on {{ inventory_hostname }}"
+
+- name: Check if Cassandra is installed
+  ansible.builtin.stat:
+    path: "{{ cassandra_home }}"
+  register: cassandra_install
+  failed_when: not cassandra_install.stat.exists
+
+- name: Check if cassandra-env.sh exists
+  ansible.builtin.stat:
+    path: "{{ cassandra_env_file }}"
+  register: cassandra_env
+  failed_when: not cassandra_env.stat.exists
+
+- name: Create JMX security directory
+  ansible.builtin.file:
+    path: "{{ jmx_security_dir }}"
+    state: directory
+    owner: "{{ cassandra_user }}"
+    group: "{{ cassandra_group }}"
+    mode: '0755'
+  become: yes
+
+- name: Backup original cassandra-env.sh
+  ansible.builtin.copy:
+    src: "{{ cassandra_env_file }}"
+    dest: "{{ cassandra_env_file }}{{ backup_suffix }}"
+    remote_src: yes
+    owner: "{{ cassandra_user }}"
+    group: "{{ cassandra_group }}"
+    mode: preserve
+  become: yes
+
+- name: Disable LOCAL_JMX in cassandra-env.sh
+  ansible.builtin.lineinfile:
+    path: "{{ cassandra_env_file }}"
+    regexp: '^(\s*)LOCAL_JMX=yes'
+    line: '\1LOCAL_JMX=no'
+    backrefs: yes
+    backup: no
+  become: yes
+  notify: restart cassandra
+
+- name: Check if JMX authentication options already exist
+  ansible.builtin.lineinfile:
+    path: "{{ cassandra_env_file }}"
+    regexp: '.*jmxremote\.authenticate.*'
+    state: absent
+  check_mode: yes
+  register: jmx_options_check
+  changed_when: false
+
+- name: Add JMX authentication JVM options block
+  ansible.builtin.blockinfile:
+    path: "{{ cassandra_env_file }}"
+    marker: "# {mark} ANSIBLE MANAGED JMX AUTHENTICATION BLOCK"
+    block: |
+      # Enable JMX Authentication
+      JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.authenticate=true"
+      JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.password.file={{ jmx_password_file }}"
+      JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.access.file={{ jmx_access_file }}"
+    insertafter: EOF
+    create: no
+  become: yes
+  notify: restart cassandra
+  when: jmx_options_check.found == 0
+
+- name: Deploy JMX password file
+  ansible.builtin.template:
+    src: jmxremote.password.j2
+    dest: "{{ jmx_password_file }}"
+    owner: "{{ cassandra_user }}"
+    group: "{{ cassandra_group }}"
+    mode: "{{ jmx_file_permissions }}"
+  become: yes
+  notify: restart cassandra
+  no_log: true
+
+- name: Deploy JMX access control file
+  ansible.builtin.template:
+    src: jmxremote.access.j2
+    dest: "{{ jmx_access_file }}"
+    owner: "{{ cassandra_user }}"
+    group: "{{ cassandra_group }}"
+    mode: "{{ jmx_file_permissions }}"
+  become: yes
+  notify: restart cassandra
+
+- name: Verify JMX password file permissions
+  ansible.builtin.stat:
+    path: "{{ jmx_password_file }}"
+  register: password_file_stat
+  become: yes
+
+- name: Verify JMX access file permissions
+  ansible.builtin.stat:
+    path: "{{ jmx_access_file }}"
+  register: access_file_stat
+  become: yes
+
+- name: Assert correct file permissions
+  ansible.builtin.assert:
+    that:
+      - password_file_stat.stat.mode == '0400'
+      - access_file_stat.stat.mode == '0400'
+      - password_file_stat.stat.pw_name == cassandra_user
+      - access_file_stat.stat.pw_name == cassandra_user
+    fail_msg: "JMX security files have incorrect permissions!"
+    success_msg: "JMX security files have correct permissions (400)"

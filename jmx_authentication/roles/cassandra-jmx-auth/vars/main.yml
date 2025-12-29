@@ -1,0 +1,4 @@
+---
+jmx_remote_auth: "true"
+local_jmx_disabled: "no"
+backup_suffix: ".backup.{{ ansible_date_time.epoch }}"

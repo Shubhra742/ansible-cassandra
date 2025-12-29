@@ -1,0 +1,40 @@
+---
+- name: Configure Cassandra JMX Authentication
+  hosts: cassandra_nodes
+  become: yes
+  
+  roles:
+    - role: cassandra-jmx-auth
+
+  post_tasks:
+    - name: Verify JMX authentication (negative test - should fail)
+      ansible.builtin.shell: nodetool status 2>&1 || true
+      register: nodetool_no_auth
+      changed_when: false
+
+    - name: Display negative test result
+      ansible.builtin.debug:
+        msg: "✓ Negative test passed - nodetool without credentials failed as expected"
+      when: "'Authentication failed' in nodetool_no_auth.stdout or 'SecurityException' in nodetool_no_auth.stdout or nodetool_no_auth.rc != 0"
+
+    - name: Verify JMX authentication (positive test - should succeed)
+      ansible.builtin.shell: nodetool -u cassandra -pw cassandra_password status
+      register: nodetool_with_auth
+      changed_when: false
+      become: yes
+
+    - name: Display positive test result
+      ansible.builtin.debug:
+        msg: 
+          - "✓ JMX Authentication is working correctly!"
+          - "{{ nodetool_with_auth.stdout_lines }}"
+      when: nodetool_with_auth.rc == 0
+
+    - name: Verify node is UP and NORMAL
+      ansible.builtin.assert:
+        that:
+          - nodetool_with_auth.rc == 0
+          - "'UN' in nodetool_with_auth.stdout"
+        success_msg: "✓ Cassandra node is UP and authentication is working!"
+        fail_msg: "✗ Node status check failed"
+      when: nodetool_with_auth.rc == 0

@@ -1,0 +1,16 @@
+---
+- name: restart cassandra
+  ansible.builtin.systemd:
+    name: "{{ cassandra_service_name }}"
+    state: restarted
+    daemon_reload: yes
+  become: yes
+  listen: restart cassandra
+
+- name: wait for cassandra to start
+  ansible.builtin.wait_for:
+    port: 9042
+    host: "{{ ansible_default_ipv4.address }}"
+    delay: 10
+    timeout: 300
+  listen: restart cassandra

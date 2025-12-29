@@ -1,0 +1,24 @@
+---
+# Default variables for JMX authentication setup
+# Cassandra installed via Debian/Ubuntu package
+cassandra_home: /usr/share/cassandra
+cassandra_conf_dir: /etc/cassandra
+cassandra_env_file: "{{ cassandra_conf_dir }}/cassandra-env.sh"
+
+jmx_security_dir: /etc/cassandra
+jmx_password_file: "{{ jmx_security_dir }}/jmxremote.password"
+jmx_access_file: "{{ jmx_security_dir }}/jmxremote.access"
+
+cassandra_service_name: cassandra
+cassandra_user: cassandra
+cassandra_group: cassandra
+
+jmx_users:
+  - username: cassandra
+    password: cassandra_password
+    access: readwrite
+  - username: monitor
+    password: monitor123
+    access: readonly
+
+jmx_file_permissions: "0400"
