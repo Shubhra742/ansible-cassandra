@@ -1,0 +1,82 @@
+---
+# Cassandra configuration tasks
+
+- name: Backup original cassandra.yaml with timestamp
+  copy:
+    src: "{{ cassandra_conf_dir }}/cassandra.yaml"
+    dest: "{{ cassandra_conf_dir }}/cassandra.yaml.backup.{{ ansible_date_time.epoch }}"
+    remote_src: yes
+    force: yes
+
+- name: Comment out original client_encryption_options block
+  replace:
+    path: "{{ cassandra_conf_dir }}/cassandra.yaml"
+    regexp: '^(client_encryption_options:)$'
+    replace: '# \1 # COMMENTED BY ANSIBLE - Original block'
+    backup: yes
+  register: comment_first_line
+
+- name: Comment out the entire original client_encryption_options section
+  replace:
+    path: "{{ cassandra_conf_dir }}/cassandra.yaml"
+    regexp: '^(  # Enable client-to-server encryption)$'
+    replace: '# \1'
+    backup: no
+
+- name: Comment out enabled line in original block
+  replace:
+    path: "{{ cassandra_conf_dir }}/cassandra.yaml"
+    regexp: '^(  enabled: false)$'
+    replace: '# \1'
+    backup: no
+
+- name: Comment out remaining lines in original client_encryption_options
+  replace:
+    path: "{{ cassandra_conf_dir }}/cassandra.yaml"
+    regexp: '^(  # When set to true.*|  # This should.*|  # optional defaults to.*|  # optional:.*|  # Set keystore.*|  keystore: conf.*|  keystore_password:.*|  # Configure the way.*|  # To use PEM-based.*|  # ssl_context_factory:.*)$'
+    replace: '# \1'
+    backup: no
+
+- name: Remove existing Ansible managed client encryption block if present
+  blockinfile:
+    path: "{{ cassandra_conf_dir }}/cassandra.yaml"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - CLIENT ENCRYPTION"
+    state: absent
+  ignore_errors: yes
+
+- name: Add new client encryption configuration at the end
+  blockinfile:
+    path: "{{ cassandra_conf_dir }}/cassandra.yaml"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - CLIENT ENCRYPTION"
+    block: |
+      client_encryption_options:
+          enabled: {{ client_encryption_enabled | lower }}
+          optional: {{ (not require_client_auth) | lower }}
+          keystore: {{ cassandra_ssl_dir }}/cassandra-server-keystore.jks
+          keystore_password: {{ ssl_keystore_password }}
+          require_client_auth: {{ require_client_auth | lower }}
+          truststore: {{ cassandra_ssl_dir }}/cassandra-server-truststore.jks
+          truststore_password: {{ ssl_truststore_password }}
+          protocol: TLS
+          algorithm: SunX509
+          store_type: JKS
+          cipher_suites: [TLS_RSA_WITH_AES_256_CBC_SHA, TLS_RSA_WITH_AES_128_CBC_SHA]
+    insertafter: EOF
+    backup: yes
+  notify: restart cassandra
+
+- name: Ensure native_transport_port_ssl is configured
+  lineinfile:
+    path: "{{ cassandra_conf_dir }}/cassandra.yaml"
+    regexp: '^#?\s*native_transport_port_ssl:'
+    line: 'native_transport_port_ssl: {{ cassandra_ssl_port }}'
+    backup: yes
+  notify: restart cassandra
+
+- name: Display configuration information
+  debug:
+    msg:
+      - "Cassandra SSL configuration completed"
+      - "SSL Port: {{ cassandra_ssl_port }}"
+      - "Regular Port: {{ cassandra_native_port }}"
+      - "Client Auth Required: {{ require_client_auth }}"

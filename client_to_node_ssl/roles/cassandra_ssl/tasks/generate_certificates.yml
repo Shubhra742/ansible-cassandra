@@ -1,0 +1,119 @@
+---
+# Certificate generation tasks
+
+- name: Ensure SSL directory exists
+  file:
+    path: "{{ cassandra_ssl_dir }}"
+    state: directory
+    owner: "{{ cassandra_user }}"
+    group: "{{ cassandra_group }}"
+    mode: '0755'
+
+- name: Check if keystore already exists
+  stat:
+    path: "{{ cassandra_ssl_dir }}/cassandra-server-keystore.jks"
+  register: keystore_stat
+
+- name: Generate server keystore
+  shell: |
+    keytool -genkeypair \
+      -keyalg RSA \
+      -alias cassandra \
+      -keystore {{ cassandra_ssl_dir }}/cassandra-server-keystore.jks \
+      -storepass {{ ssl_keystore_password }} \
+      -keypass {{ ssl_key_password }} \
+      -validity {{ ssl_validity_days }} \
+      -keysize 2048 \
+      -dname "CN={{ ansible_hostname }},OU={{ ssl_org_unit }},O={{ ssl_org }},L={{ ssl_city }},ST={{ ssl_state }},C={{ ssl_country }}"
+  when: not keystore_stat.stat.exists
+  notify: restart cassandra
+
+- name: Export certificate from keystore
+  shell: |
+    keytool -export \
+      -alias cassandra \
+      -file {{ cassandra_ssl_dir }}/cassandra-server-cert.cer \
+      -keystore {{ cassandra_ssl_dir }}/cassandra-server-keystore.jks \
+      -storepass {{ ssl_keystore_password }}
+  args:
+    creates: "{{ cassandra_ssl_dir }}/cassandra-server-cert.cer"
+
+- name: Create local temp directory for certificates
+  file:
+    path: /tmp/cassandra_certs
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+  become: no
+  run_once: true
+
+- name: Fetch certificates to local machine
+  fetch:
+    src: "{{ cassandra_ssl_dir }}/cassandra-server-cert.cer"
+    dest: "/tmp/cassandra_certs/{{ inventory_hostname }}-cert.cer"
+    flat: yes
+
+- name: Check if truststore already exists
+  stat:
+    path: "{{ cassandra_ssl_dir }}/cassandra-server-truststore.jks"
+  register: truststore_stat
+
+- name: Create truststore and import own certificate
+  shell: |
+    keytool -import \
+      -v -trustcacerts \
+      -alias cassandra_{{ inventory_hostname }} \
+      -file {{ cassandra_ssl_dir }}/cassandra-server-cert.cer \
+      -keystore {{ cassandra_ssl_dir }}/cassandra-server-truststore.jks \
+      -storepass {{ ssl_truststore_password }} \
+      -noprompt
+  when: not truststore_stat.stat.exists
+
+- name: Wait for all certificates to be fetched
+  wait_for:
+    path: "/tmp/cassandra_certs/{{ item }}-cert.cer"
+    timeout: 60
+  delegate_to: localhost
+  become: no
+  with_items: "{{ groups['cassandra_nodes'] }}"
+  when: item != inventory_hostname
+
+- name: Copy certificates from other nodes to remote server
+  copy:
+    src: "/tmp/cassandra_certs/{{ item }}-cert.cer"
+    dest: "{{ cassandra_ssl_dir }}/{{ item }}-cert.cer"
+    owner: "{{ cassandra_user }}"
+    group: "{{ cassandra_group }}"
+    mode: '0644'
+  with_items: "{{ groups['cassandra_nodes'] }}"
+  when: item != inventory_hostname
+
+- name: Import certificates from other nodes into truststore
+  shell: |
+    keytool -import \
+      -v -trustcacerts \
+      -alias cassandra_{{ item }} \
+      -file {{ cassandra_ssl_dir }}/{{ item }}-cert.cer \
+      -keystore {{ cassandra_ssl_dir }}/cassandra-server-truststore.jks \
+      -storepass {{ ssl_truststore_password }} \
+      -noprompt
+  with_items: "{{ groups['cassandra_nodes'] }}"
+  when: item != inventory_hostname
+  ignore_errors: yes
+
+- name: Set permissions on SSL files
+  file:
+    path: "{{ item }}"
+    owner: "{{ cassandra_user }}"
+    group: "{{ cassandra_group }}"
+    mode: '0600'
+  with_items:
+    - "{{ cassandra_ssl_dir }}/cassandra-server-keystore.jks"
+    - "{{ cassandra_ssl_dir }}/cassandra-server-truststore.jks"
+
+- name: Display SSL setup information
+  debug:
+    msg:
+      - "SSL certificates generated successfully for {{ inventory_hostname }}"
+      - "Keystore location: {{ cassandra_ssl_dir }}/cassandra-server-keystore.jks"
+      - "Truststore location: {{ cassandra_ssl_dir }}/cassandra-server-truststore.jks"

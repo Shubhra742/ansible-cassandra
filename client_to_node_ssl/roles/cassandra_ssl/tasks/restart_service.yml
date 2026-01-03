@@ -1,0 +1,83 @@
+---
+# Service restart and verification tasks
+
+- name: Restart Cassandra service
+  systemd:
+    name: cassandra
+    state: restarted
+    enabled: yes
+  register: cassandra_restart
+
+- name: Wait for Cassandra native port to be ready
+  wait_for:
+    port: "{{ cassandra_native_port }}"
+    host: "{{ ansible_default_ipv4.address }}"
+    delay: 10
+    timeout: 300
+    state: started
+  when: cassandra_restart.changed
+
+- name: Wait for Cassandra SSL port to be ready
+  wait_for:
+    port: "{{ cassandra_ssl_port }}"
+    host: "{{ ansible_default_ipv4.address }}"
+    delay: 5
+    timeout: 300
+    state: started
+  when: cassandra_restart.changed
+
+- name: Verify Cassandra is running
+  shell: systemctl status cassandra
+  register: cassandra_status
+  changed_when: false
+  failed_when: "'active (running)' not in cassandra_status.stdout"
+
+- name: Check Cassandra cluster status
+  shell: nodetool status
+  register: nodetool_output
+  changed_when: false
+  ignore_errors: yes
+
+- name: Display Cassandra cluster status
+  debug:
+    var: nodetool_output.stdout_lines
+  when: nodetool_output is defined and nodetool_output.stdout_lines is defined
+
+- name: Verify SSL port is listening
+  shell: netstat -tlnp | grep {{ cassandra_ssl_port }} || ss -tlnp | grep {{ cassandra_ssl_port }}
+  register: ssl_port_check
+  changed_when: false
+  ignore_errors: yes
+
+- name: Display SSL port status
+  debug:
+    msg: "✓ SSL port {{ cassandra_ssl_port }} is listening"
+  when: ssl_port_check.rc == 0
+
+- name: Warning if SSL port not listening
+  debug:
+    msg: "✗ WARNING: SSL port {{ cassandra_ssl_port }} is NOT listening!"
+  when: ssl_port_check.rc != 0
+
+- name: Verify client_encryption_options is enabled
+  shell: grep -A 2 "ANSIBLE MANAGED BLOCK - CLIENT ENCRYPTION" {{ cassandra_conf_dir }}/cassandra.yaml | grep "enabled:"
+  register: ssl_enabled_check
+  changed_when: false
+
+- name: Display SSL enabled status
+  debug:
+    var: ssl_enabled_check.stdout_lines
+
+- name: Display service restart summary
+  debug:
+    msg:
+      - "============================================"
+      - "Cassandra SSL Setup Completed Successfully!"
+      - "============================================"
+      - "Node: {{ inventory_hostname }}"
+      - "SSL Port: {{ cassandra_ssl_port }}"
+      - "Native Port: {{ cassandra_native_port }}"
+      - "SSL Enabled: {{ client_encryption_enabled }}"
+      - "============================================"
+      - "Test with: cqlsh {{ inventory_hostname }} {{ cassandra_ssl_port }} --ssl"
+      - "============================================"

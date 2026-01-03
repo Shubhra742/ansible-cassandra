@@ -1,0 +1,7 @@
+- name: Setup Cassandra Client-to-Node SSL
+  hosts: cassandra_nodes
+  become: yes
+  gather_facts: yes
+  
+  roles:
+    - cassandra_ssl

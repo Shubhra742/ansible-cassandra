@@ -1,0 +1,30 @@
+---
+# Setup cqlshrc for SSL connections
+
+- name: Create .cassandra directory for ubuntu user
+  file:
+    path: /home/ubuntu/.cassandra
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: '0755'
+
+- name: Create cqlshrc configuration file
+  copy:
+    dest: /home/ubuntu/.cassandra/cqlshrc
+    owner: ubuntu
+    group: ubuntu
+    mode: '0644'
+    content: |
+      [connection]
+      hostname = localhost
+      port = 9142
+      
+      [ssl]
+      validate = false
+
+- name: Display cqlsh connection info
+  debug:
+    msg:
+      - "✓ cqlshrc configured successfully"
+      - "Connect with: cqlsh localhost 9142 --ssl"

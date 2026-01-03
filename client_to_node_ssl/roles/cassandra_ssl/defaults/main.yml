@@ -1,0 +1,30 @@
+---
+# Default variables for Cassandra SSL setup
+
+# Cassandra paths
+cassandra_home: /etc/cassandra
+cassandra_conf_dir: /etc/cassandra
+cassandra_ssl_dir: "{{ cassandra_conf_dir }}/ssl"
+cassandra_user: cassandra
+cassandra_group: cassandra
+
+# SSL Certificate settings
+ssl_keystore_password: "changeit"
+ssl_truststore_password: "changeit"
+ssl_key_password: "changeit"
+ssl_validity_days: 3650
+
+# Certificate details
+ssl_country: "US"
+ssl_state: "California"
+ssl_city: "San Francisco"
+ssl_org: "MyOrganization"
+ssl_org_unit: "IT"
+
+# Cassandra SSL settings
+client_encryption_enabled: true
+require_client_auth: false
+
+# Ports
+cassandra_native_port: 9042
+cassandra_ssl_port: 9142

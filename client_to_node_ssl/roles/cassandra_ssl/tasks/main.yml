@@ -1,0 +1,26 @@
+---
+# Main tasks file for Cassandra SSL setup
+
+- name: Include certificate generation tasks
+  include_tasks: generate_certificates.yml
+  tags:
+    - certificates
+    - generate
+
+- name: Include Cassandra configuration tasks
+  include_tasks: configure_cassandra.yml
+  tags:
+    - configure
+    - config
+
+- name: Include service restart tasks
+  include_tasks: restart_service.yml
+  tags:
+    - restart
+    - service
+
+- name: Include cqlsh setup tasks
+  include_tasks: setup_cqlsh.yml
+  tags:
+    - cqlsh
+    - config
