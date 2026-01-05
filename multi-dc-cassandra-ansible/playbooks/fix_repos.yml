@@ -1,0 +1,24 @@
+---
+- name: Fix Repository Issues
+  hosts: all
+  become: yes
+  
+  tasks:
+    - name: Remove problematic PostgreSQL repositories
+      shell: |
+        rm -f /etc/apt/sources.list.d/*postgres* /etc/apt/sources.list.d/*pgdg*
+      args:
+        warn: false
+      ignore_errors: yes
+    
+    - name: Clean apt cache
+      apt:
+        autoclean: yes
+        autoremove: yes
+      ignore_errors: yes
+    
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        force_apt_get: yes
+      ignore_errors: yes

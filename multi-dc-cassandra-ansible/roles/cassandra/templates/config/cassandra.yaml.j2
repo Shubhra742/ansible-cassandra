@@ -1,0 +1,43 @@
+cluster_name: '{{ cassandra_cluster_name }}'
+num_tokens: {{ cassandra_num_tokens }}
+
+seed_provider:
+    - class_name: {{ cassandra_seed_provider }}
+      parameters:
+          - seeds: "{{ cassandra_seeds }}"
+
+listen_address: {{ cassandra_listen_address }}
+broadcast_address: {{ cassandra_broadcast_address }}
+rpc_address: {{ cassandra_rpc_address }}
+broadcast_rpc_address: {{ cassandra_broadcast_rpc_address }}
+
+storage_port: {{ cassandra_storage_port }}
+ssl_storage_port: {{ cassandra_ssl_storage_port }}
+native_transport_port: {{ cassandra_native_transport_port }}
+
+data_file_directories:
+    - {{ cassandra_data_dir }}
+
+commitlog_directory: {{ cassandra_commitlog_dir }}
+saved_caches_directory: {{ cassandra_saved_caches_dir }}
+hints_directory: {{ cassandra_hints_dir }}
+
+endpoint_snitch: {{ cassandra_endpoint_snitch }}
+authenticator: {{ cassandra_authenticator }}
+authorizer: {{ cassandra_authorizer }}
+
+concurrent_reads: {{ cassandra_concurrent_reads }}
+concurrent_writes: {{ cassandra_concurrent_writes }}
+concurrent_counter_writes: {{ cassandra_concurrent_counter_writes }}
+
+start_native_transport: true
+start_rpc: false
+auto_bootstrap: {{ cassandra_auto_bootstrap | bool | lower }}
+
+commitlog_sync: periodic
+commitlog_sync_period_in_ms: 10000
+
+read_request_timeout_in_ms: 5000
+write_request_timeout_in_ms: 2000
+
+internode_compression: dc

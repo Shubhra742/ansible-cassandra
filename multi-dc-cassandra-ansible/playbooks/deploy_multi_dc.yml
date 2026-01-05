@@ -1,0 +1,84 @@
+---
+# Stage 1: Deploy seed nodes first (one from each DC)
+- name: Deploy Seed Nodes
+  hosts: 
+    - cassandra-dc1-node1
+    - cassandra-dc2-node1
+  become: yes
+  serial: 1
+  vars:
+    cassandra_auto_bootstrap: false
+  
+  roles:
+    - cassandra
+  
+  post_tasks:
+    - name: Wait for seed nodes to stabilize
+      pause:
+        seconds: 60
+
+    - name: Check seed node status
+      shell: nodetool status
+      register: seed_status
+      become_user: cassandra
+      changed_when: false
+
+    - name: Display seed node status
+      debug:
+        var: seed_status.stdout_lines
+
+# Stage 2: Deploy remaining nodes in DC1
+- name: Deploy DC1 Non-Seed Nodes
+  hosts: cassandra-dc1-node2
+  become: yes
+  serial: 1
+  vars:
+    cassandra_auto_bootstrap: true
+  
+  roles:
+    - cassandra
+  
+  post_tasks:
+    - name: Wait for node to join cluster
+      pause:
+        seconds: 120
+
+    - name: Check cluster status
+      shell: nodetool status
+      register: cluster_status
+      become_user: cassandra
+      changed_when: false
+
+    - name: Display cluster status
+      debug:
+        var: cluster_status.stdout_lines
+
+# Stage 3: Verify full cluster
+- name: Verify Complete Cluster
+  hosts: cassandra-dc1-node1
+  become: yes
+  
+  tasks:
+    - name: Final cluster status check
+      shell: nodetool status
+      register: final_status
+      become_user: cassandra
+      changed_when: false
+
+    - name: Display final cluster status
+      debug:
+        msg:
+          - "=========================================="
+          - "Multi-DC Cassandra Cluster Deployment Complete!"
+          - "=========================================="
+          - "{{ final_status.stdout_lines }}"
+          - ""
+          - "Cluster Name: MultiDC_Cluster"
+          - "Total Nodes: {{ groups['cassandra_cluster'] | length }}"
+          - ""
+          - "To verify:"
+          - "  nodetool status"
+          - "  nodetool describecluster"
+          - ""
+          - "To connect:"
+          - "  cqlsh {{ hostvars[groups['cassandra_cluster'][0]]['node_ip'] }}"

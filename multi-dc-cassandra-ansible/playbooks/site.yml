@@ -1,0 +1,26 @@
+---
+- name: Deploy Multi-DC Cassandra Cluster
+  hosts: cassandra_cluster
+  become: yes
+  serial: "{{ cassandra_serial | default('100%') }}"
+  
+  pre_tasks:
+    - name: Display deployment information
+      debug:
+        msg: 
+          - "Deploying to: {{ inventory_hostname }}"
+          - "Datacenter: {{ datacenter }}"
+          - "Node IP: {{ node_ip }}"
+
+    - name: Check connectivity
+      ping:
+
+  roles:
+    - cassandra
+
+  post_tasks:
+    - name: Verify Cassandra is running
+      systemd:
+        name: cassandra
+        state: started
+      check_mode: yes

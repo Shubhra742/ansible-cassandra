@@ -1,0 +1,69 @@
+---
+# Cassandra version
+cassandra_version: "4.1"
+cassandra_package: "cassandra"
+
+# Installation paths
+cassandra_home: "/etc/cassandra"
+cassandra_data_dir: "/var/lib/cassandra/data"
+cassandra_commitlog_dir: "/var/lib/cassandra/commitlog"
+cassandra_saved_caches_dir: "/var/lib/cassandra/saved_caches"
+cassandra_hints_dir: "/var/lib/cassandra/hints"
+cassandra_log_dir: "/var/log/cassandra"
+
+# Cassandra user
+cassandra_user: "cassandra"
+cassandra_group: "cassandra"
+
+# System limits
+cassandra_file_limits: 100000
+cassandra_max_map_count: 1048575
+
+# Cluster configuration
+cassandra_cluster_name: "MultiDC_Cluster"
+cassandra_listen_address: "{{ node_ip }}"
+cassandra_rpc_address: "{{ node_ip }}"
+cassandra_broadcast_address: "{{ node_ip }}"
+cassandra_broadcast_rpc_address: "{{ node_ip }}"
+
+# Seeds configuration
+cassandra_seed_provider: "org.apache.cassandra.locator.SimpleSeedProvider"
+
+# Network settings
+cassandra_storage_port: 7000
+cassandra_ssl_storage_port: 7001
+cassandra_native_transport_port: 9042
+cassandra_rpc_port: 9160
+
+# Endpoint snitch
+cassandra_endpoint_snitch: "GossipingPropertyFileSnitch"
+
+# Memory settings
+cassandra_heap_size: "4G"
+cassandra_young_gen_size: "800M"
+
+# Replication settings
+cassandra_num_tokens: 256
+
+# Consistency
+cassandra_concurrent_reads: 32
+cassandra_concurrent_writes: 32
+cassandra_concurrent_counter_writes: 32
+
+# Security
+cassandra_authenticator: "AllowAllAuthenticator"
+cassandra_authorizer: "AllowAllAuthorizer"
+
+# JMX
+cassandra_jmx_port: 7199
+
+# Compaction
+cassandra_compaction_throughput_mb: 64
+cassandra_concurrent_compactors: 4
+cassandra_memtable_allocation_type: "heap_buffers"
+
+# Bootstrap
+cassandra_auto_bootstrap: true
+
+# Data cleanup (set to true for fresh installation)
+cassandra_clear_data: true

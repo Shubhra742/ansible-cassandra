@@ -1,0 +1,192 @@
+---
+# Robust installation with apt cache cleanup
+
+- name: Kill any running apt/dpkg processes
+  shell: |
+    killall apt apt-get dpkg 2>/dev/null || true
+    sleep 2
+  changed_when: false
+  ignore_errors: yes
+  become: yes
+
+- name: Remove apt locks
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/lib/dpkg/lock
+    - /var/lib/dpkg/lock-frontend
+    - /var/lib/apt/lists/lock
+    - /var/cache/apt/archives/lock
+  ignore_errors: yes
+  become: yes
+
+- name: Check dpkg status
+  shell: dpkg --audit
+  register: dpkg_audit
+  changed_when: false
+  failed_when: false
+  become: yes
+
+- name: Configure any unconfigured packages
+  shell: dpkg --configure -a
+  register: dpkg_configure
+  changed_when: false
+  failed_when: false
+  become: yes
+
+- name: Fix broken packages
+  shell: apt-get -f install -y
+  register: apt_fix
+  changed_when: false
+  failed_when: false
+  become: yes
+  when: dpkg_configure.rc != 0 or dpkg_audit.rc != 0
+
+- name: Remove problematic repositories
+  shell: |
+    rm -f /etc/apt/sources.list.d/*postgres* /etc/apt/sources.list.d/*pgdg*
+  become: yes
+  ignore_errors: yes
+  changed_when: false
+
+- name: Clean apt cache completely
+  shell: |
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+    mkdir -p /var/lib/apt/lists/partial
+  changed_when: false
+  become: yes
+
+- name: Force apt-get update
+  shell: apt-get update -y 2>&1
+  register: forced_update
+  changed_when: false
+  retries: 3
+  delay: 5
+  until: forced_update.rc == 0
+  become: yes
+
+- name: Install required packages
+  shell: |
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      -o Dpkg::Options::="--force-confdef" \
+      -o Dpkg::Options::="--force-confold" \
+      curl gnupg apt-transport-https ca-certificates software-properties-common openjdk-11-jdk
+  register: pkg_install
+  retries: 5
+  delay: 10
+  until: pkg_install.rc == 0
+  become: yes
+
+- name: Create keyrings directory
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+  become: yes
+
+- name: Download Apache Cassandra repository key
+  get_url:
+    url: https://downloads.apache.org/cassandra/KEYS
+    dest: /etc/apt/keyrings/apache-cassandra.asc
+    mode: '0644'
+    force: yes
+  retries: 3
+  delay: 5
+  become: yes
+
+- name: Add Cassandra APT repository
+  lineinfile:
+    path: /etc/apt/sources.list.d/cassandra.sources.list
+    line: "deb [signed-by=/etc/apt/keyrings/apache-cassandra.asc] https://debian.cassandra.apache.org 41x main"
+    create: yes
+    mode: '0644'
+  become: yes
+
+- name: Update apt cache with Cassandra repository
+  shell: apt-get update -y
+  register: apt_update_cassandra
+  retries: 3
+  delay: 5
+  until: apt_update_cassandra.rc == 0
+  failed_when: false
+  become: yes
+
+- name: Install Apache Cassandra
+  shell: |
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      -o Dpkg::Options::="--force-confdef" \
+      -o Dpkg::Options::="--force-confold" \
+      cassandra
+  retries: 5
+  delay: 10
+  register: cassandra_install
+  until: cassandra_install.rc == 0
+  become: yes
+
+- name: Stop Cassandra service for configuration
+  systemd:
+    name: cassandra
+    state: stopped
+  ignore_errors: yes
+  become: yes
+
+- name: Set system limits for Cassandra
+  pam_limits:
+    domain: cassandra
+    limit_type: "{{ item.limit_type }}"
+    limit_item: "{{ item.limit_item }}"
+    value: "{{ item.value }}"
+  loop:
+    - { limit_type: '-', limit_item: 'nofile', value: '100000' }
+    - { limit_type: '-', limit_item: 'nproc', value: '100000' }
+    - { limit_type: '-', limit_item: 'memlock', value: 'unlimited' }
+    - { limit_type: '-', limit_item: 'as', value: 'unlimited' }
+  become: yes
+
+- name: Set vm.max_map_count
+  sysctl:
+    name: vm.max_map_count
+    value: "1048575"
+    state: present
+    reload: yes
+  become: yes
+
+- name: Clear Cassandra data directories (fresh start)
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/lib/cassandra/data
+    - /var/lib/cassandra/commitlog
+    - /var/lib/cassandra/saved_caches
+    - /var/lib/cassandra/hints
+  become: yes
+
+- name: Ensure Cassandra directories exist
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: cassandra
+    group: cassandra
+    mode: '0755'
+  loop:
+    - /var/lib/cassandra/data
+    - /var/lib/cassandra/commitlog
+    - /var/lib/cassandra/saved_caches
+    - /var/lib/cassandra/hints
+    - /var/log/cassandra
+  become: yes
+
+- name: Ensure proper permissions on Cassandra directories
+  file:
+    path: "{{ item }}"
+    owner: cassandra
+    group: cassandra
+    recurse: yes
+  loop:
+    - /var/lib/cassandra
+    - /var/log/cassandra
+    - /etc/cassandra
+  become: yes

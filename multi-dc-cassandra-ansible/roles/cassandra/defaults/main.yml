@@ -1,0 +1,10 @@
+---
+java_package: "openjdk-11-jdk"
+cassandra_max_map_count: 1048575
+cassandra_file_limits: 100000
+cassandra_compaction_throughput_mb: 64
+cassandra_concurrent_compactors: 4
+cassandra_memtable_allocation_type: "heap_buffers"
+cassandra_auto_bootstrap: true
+cassandra_user: "cassandra"
+cassandra_group: "cassandra"

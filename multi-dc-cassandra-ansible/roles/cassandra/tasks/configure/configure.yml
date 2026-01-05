@@ -1,0 +1,66 @@
+---
+- name: Backup original cassandra.yaml
+  copy:
+    src: /etc/cassandra/cassandra.yaml
+    dest: /etc/cassandra/cassandra.yaml.backup
+    remote_src: yes
+    force: no
+  become: yes
+  ignore_errors: yes
+
+- name: Get current node IP address
+  set_fact:
+    current_node_ip: "{{ node_ip }}"
+
+- name: Display configuration details
+  debug:
+    msg:
+      - "Node IP: {{ current_node_ip }}"
+      - "Seeds: {{ cassandra_seeds }}"
+      - "Datacenter: {{ datacenter }}"
+      - "Rack: {{ rack }}"
+
+- name: Configure Cassandra cluster settings in cassandra.yaml
+  lineinfile:
+    path: /etc/cassandra/cassandra.yaml
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    backup: yes
+  loop:
+    - { regexp: '^cluster_name:', line: "cluster_name: 'MultiDC_Cluster'" }
+    - { regexp: '^listen_address:', line: "listen_address: {{ current_node_ip }}" }
+    - { regexp: '^rpc_address:', line: "rpc_address: 0.0.0.0" }
+    - { regexp: '^# broadcast_rpc_address:', line: "broadcast_rpc_address: {{ current_node_ip }}" }
+    - { regexp: '^broadcast_rpc_address:', line: "broadcast_rpc_address: {{ current_node_ip }}" }
+    - { regexp: '^endpoint_snitch:', line: "endpoint_snitch: GossipingPropertyFileSnitch" }
+    - { regexp: '^num_tokens:', line: "num_tokens: 256" }
+  become: yes
+
+- name: Configure seed providers in cassandra.yaml
+  replace:
+    path: /etc/cassandra/cassandra.yaml
+    regexp: '- seeds: "127\.0\.0\.1:7000"'
+    replace: '- seeds: "{{ cassandra_seeds }}"'
+    backup: yes
+  become: yes
+
+- name: Alternative seed configuration (if first pattern doesn't match)
+  replace:
+    path: /etc/cassandra/cassandra.yaml
+    regexp: '- seeds: "127\.0\.0\.1"'
+    replace: '- seeds: "{{ cassandra_seeds }}"'
+    backup: yes
+  become: yes
+  ignore_errors: yes
+
+- name: Configure cassandra-rackdc.properties
+  lineinfile:
+    path: /etc/cassandra/cassandra-rackdc.properties
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    create: yes
+  loop:
+    - { regexp: '^dc=', line: "dc={{ datacenter }}" }
+    - { regexp: '^rack=', line: "rack={{ rack }}" }
+    - { regexp: '^prefer_local=', line: "prefer_local=true" }
+  become: yes

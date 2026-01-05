@@ -1,0 +1,7 @@
+---
+- name: restart cassandra
+  systemd:
+    name: cassandra
+    state: restarted
+  become: yes
+  listen: restart cassandra
