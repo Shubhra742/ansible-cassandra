@@ -1,0 +1,4 @@
+---
+backup_base_dir: /home/ec2-user/backup_cassandra
+log_dir: /tmp/cassandra_backup
+retention_days_central: 7

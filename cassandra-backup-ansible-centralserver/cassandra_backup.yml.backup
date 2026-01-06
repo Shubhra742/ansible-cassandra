@@ -1,0 +1,78 @@
+---
+# cassandra_backup.yml - Main Playbook
+- name: Cassandra Backup Orchestration
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    snapshot_id: "snapshot_{{ ansible_date_time.date | replace('-', '') }}_{{ ansible_date_time.time | replace(':', '') }}"
+    backup_date: "{{ ansible_date_time.date | replace('-', '') }}"
+    backup_time: "{{ ansible_date_time.time | replace(':', '') }}"
+    keyspace: "{{ keyspace_name | default('all') }}"
+    
+  tasks:
+    - name: Validate keyspace parameter
+      fail:
+        msg: "Please provide keyspace name using -e keyspace_name=<name> or -e keyspace_name=all"
+      when: keyspace_name is not defined
+      
+    - name: Display backup information
+      debug:
+        msg:
+          - "Starting Cassandra Backup"
+          - "Snapshot ID: {{ snapshot_id }}"
+          - "Keyspace: {{ keyspace }}"
+          - "Date: {{ backup_date }}"
+          - "Time: {{ backup_time }}"
+
+- name: Prepare Central Server
+  hosts: central_server
+  gather_facts: no
+  roles:
+    - role: cassandra_backup_prepare
+      vars:
+        snapshot_id: "snapshot_{{ hostvars['localhost']['ansible_date_time']['date'] | replace('-', '') }}_{{ hostvars['localhost']['ansible_date_time']['time'] | replace(':', '') }}"
+        backup_date: "{{ hostvars['localhost']['backup_date'] }}"
+        backup_time: "{{ hostvars['localhost']['backup_time'] }}"
+
+- name: Take Snapshots on Cassandra Nodes
+  hosts: cassandra_nodes
+  gather_facts: no
+  serial: 100%
+  roles:
+    - role: cassandra_snapshot
+      vars:
+        snapshot_id: "snapshot_{{ hostvars['localhost']['ansible_date_time']['date'] | replace('-', '') }}_{{ hostvars['localhost']['ansible_date_time']['time'] | replace(':', '') }}"
+        keyspace: "{{ hostvars['localhost']['keyspace'] }}"
+
+- name: Copy Snapshots to Central Server
+  hosts: central_server
+  gather_facts: no
+  roles:
+    - role: cassandra_backup_copy
+      vars:
+        snapshot_id: "snapshot_{{ hostvars['localhost']['ansible_date_time']['date'] | replace('-', '') }}_{{ hostvars['localhost']['ansible_date_time']['time'] | replace(':', '') }}"
+        backup_date: "{{ hostvars['localhost']['backup_date'] }}"
+        backup_time: "{{ hostvars['localhost']['backup_time'] }}"
+
+- name: Cleanup Old Snapshots on Cassandra Nodes
+  hosts: cassandra_nodes
+  gather_facts: no
+  serial: 100%
+  roles:
+    - role: cassandra_snapshot_cleanup
+      vars:
+        keyspace: "{{ hostvars['localhost']['keyspace'] }}"
+
+- name: Final Report
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display completion message
+      debug:
+        msg:
+          - "=========================================="
+          - "Backup Process Completed Successfully!"
+          - "Snapshot ID: {{ snapshot_id }}"
+          - "Backup Location: {{ hostvars['localhost']['backup_base_dir'] }}"
+          - "Log Directory: {{ hostvars['localhost']['log_dir'] }}"
+          - "=========================================="

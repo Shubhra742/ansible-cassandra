@@ -1,0 +1,42 @@
+---
+- name: Find old snapshot directories (all keyspaces)
+  shell: |
+    find {{ cassandra_data_dir }}/*/*/snapshots/ -mindepth 1 -maxdepth 1 -type d -mtime +{{ retention_days_nodes }} -exec basename {} \;
+  register: old_snapshots_all
+  when: keyspace == 'all'
+  changed_when: false
+  failed_when: false
+
+- name: Find old snapshot directories (specific keyspace)
+  shell: |
+    find {{ cassandra_data_dir }}/{{ keyspace }}/*/snapshots/ -mindepth 1 -maxdepth 1 -type d -mtime +{{ retention_days_nodes }} -exec basename {} \;
+  register: old_snapshots_ks
+  when: keyspace != 'all'
+  changed_when: false
+  failed_when: false
+
+- name: Set old snapshots list
+  set_fact:
+    old_snapshot_list: "{{ (keyspace == 'all') | ternary(old_snapshots_all.stdout_lines, old_snapshots_ks.stdout_lines) }}"
+
+- name: Display old snapshots to be removed
+  debug:
+    msg: "Found {{ old_snapshot_list | length }} old snapshots to remove on {{ inventory_hostname }}"
+
+- name: Clear old snapshots
+  shell: |
+    nodetool clearsnapshot -t {{ item }}
+  loop: "{{ old_snapshot_list }}"
+  when: old_snapshot_list | length > 0
+  register: cleanup_result
+  failed_when: false
+
+- name: Log cleanup results
+  debug:
+    msg: "Cleaned up {{ old_snapshot_list | length }} old snapshots on {{ inventory_hostname }}"
+  when: old_snapshot_list | length > 0
+
+- name: Log no cleanup needed
+  debug:
+    msg: "No old snapshots to clean up on {{ inventory_hostname }}"
+  when: old_snapshot_list | length == 0

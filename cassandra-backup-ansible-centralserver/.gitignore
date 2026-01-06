@@ -1,0 +1,9 @@
+*.log
+*.retry
+.ansible/
+/tmp/
+logs/
+*.swp
+*.swo
+*~
+.DS_Store

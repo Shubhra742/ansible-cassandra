@@ -1,0 +1,102 @@
+---
+# cassandra_backup.yml - Main Playbook
+- name: Cassandra Backup Orchestration - Initialize Variables
+  hosts: localhost
+  gather_facts: no
+  vars:
+    keyspace: "{{ keyspace_name | default('all') }}"
+    
+  tasks:
+    - name: Get current timestamp
+      command: date +%Y%m%d_%H%M%S
+      register: current_timestamp
+      changed_when: false
+      
+    - name: Set snapshot variables
+      set_fact:
+        snapshot_id: "snapshot_{{ current_timestamp.stdout }}"
+        backup_date: "{{ current_timestamp.stdout.split('_')[0] }}"
+        backup_time: "{{ current_timestamp.stdout.split('_')[1] }}"
+    
+    - name: Validate keyspace parameter
+      fail:
+        msg: "Please provide keyspace name using -e keyspace_name=<n> or -e keyspace_name=all"
+      when: keyspace_name is not defined
+      
+    - name: Display backup information
+      debug:
+        msg:
+          - "Starting Cassandra Backup"
+          - "Snapshot ID: {{ snapshot_id }}"
+          - "Keyspace: {{ keyspace }}"
+          - "Date: {{ backup_date }}"
+          - "Time: {{ backup_time }}"
+    
+    - name: Set global facts for all hosts
+      set_fact:
+        global_snapshot_id: "{{ snapshot_id }}"
+        global_backup_date: "{{ backup_date }}"
+        global_backup_time: "{{ backup_time }}"
+        global_keyspace: "{{ keyspace }}"
+      delegate_to: "{{ item }}"
+      delegate_facts: yes
+      with_items:
+        - localhost
+        - "{{ groups['cassandra_nodes'] }}"
+
+- name: Prepare Central Server
+  hosts: central_server
+  gather_facts: no
+  vars:
+    snapshot_id: "{{ hostvars['localhost']['global_snapshot_id'] }}"
+    backup_date: "{{ hostvars['localhost']['global_backup_date'] }}"
+    backup_time: "{{ hostvars['localhost']['global_backup_time'] }}"
+    keyspace: "{{ hostvars['localhost']['global_keyspace'] }}"
+  roles:
+    - cassandra_backup_prepare
+
+- name: Take Snapshots on Cassandra Nodes
+  hosts: cassandra_nodes
+  gather_facts: no
+  serial: 100%
+  vars:
+    snapshot_id: "{{ hostvars['localhost']['global_snapshot_id'] }}"
+    keyspace: "{{ hostvars['localhost']['global_keyspace'] }}"
+  roles:
+    - cassandra_snapshot
+
+- name: Copy Snapshots to Central Server
+  hosts: central_server
+  gather_facts: no
+  vars:
+    snapshot_id: "{{ hostvars['localhost']['global_snapshot_id'] }}"
+    backup_date: "{{ hostvars['localhost']['global_backup_date'] }}"
+    backup_time: "{{ hostvars['localhost']['global_backup_time'] }}"
+    keyspace: "{{ hostvars['localhost']['global_keyspace'] }}"
+  roles:
+    - cassandra_backup_copy
+
+- name: Cleanup Old Snapshots on Cassandra Nodes
+  hosts: cassandra_nodes
+  gather_facts: no
+  serial: 100%
+  vars:
+    keyspace: "{{ hostvars['localhost']['global_keyspace'] }}"
+  roles:
+    - cassandra_snapshot_cleanup
+
+- name: Final Report
+  hosts: localhost
+  gather_facts: no
+  vars:
+    snapshot_id: "{{ global_snapshot_id }}"
+  tasks:
+    - name: Display completion message
+      debug:
+        msg:
+          - "=========================================="
+          - "Backup Process Completed Successfully!"
+          - "Snapshot ID: {{ snapshot_id }}"
+          - "Backup Location: {{ backup_base_dir }}"
+          - "Log Directory: {{ log_dir }}"
+          - "=========================================="

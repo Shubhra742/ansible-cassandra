@@ -1,0 +1,66 @@
+---
+- name: Create log directory
+  file:
+    path: "{{ log_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Create backup base directory
+  file:
+    path: "{{ backup_base_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Set log file path
+  set_fact:
+    log_file: "{{ log_dir }}/backup_{{ backup_date }}_{{ backup_time }}.log"
+
+- name: Create log file
+  copy:
+    content: |
+      ==========================================
+      Cassandra Backup Started
+      Date: {{ backup_date }}
+      Time: {{ backup_time }}
+      Snapshot ID: {{ snapshot_id }}
+      ==========================================
+    dest: "{{ log_file }}"
+    mode: '0644'
+
+- name: Cleanup old backups from central directory (date-based folders)
+  shell: |
+    find {{ backup_base_dir }} -mindepth 3 -maxdepth 3 -type d -mtime +{{ retention_days_central }} -exec rm -rf {} \; 2>/dev/null || true
+  register: cleanup_result
+  changed_when: cleanup_result.rc == 0
+
+- name: Log cleanup results
+  lineinfile:
+    path: "{{ log_file }}"
+    line: "Old snapshot folders older than {{ retention_days_central }} days deleted from {{ backup_base_dir }}"
+    insertafter: EOF
+
+- name: Cleanup empty date folders
+  shell: |
+    find {{ backup_base_dir }} -mindepth 2 -maxdepth 2 -type d -empty -delete 2>/dev/null || true
+  register: empty_cleanup
+  changed_when: empty_cleanup.rc == 0
+
+- name: Log empty folder cleanup
+  lineinfile:
+    path: "{{ log_file }}"
+    line: "Empty date folders cleaned up from {{ backup_base_dir }}"
+    insertafter: EOF
+
+- name: Verify Cassandra node connectivity
+  wait_for:
+    host: "{{ hostvars[item]['ansible_host'] }}"
+    port: 22
+    timeout: 5
+  loop: "{{ groups['cassandra_nodes'] }}"
+  register: connectivity_check
+
+- name: Log connectivity check
+  lineinfile:
+    path: "{{ log_file }}"
+    line: "Successfully verified connectivity to all Cassandra nodes"
+    insertafter: EOF

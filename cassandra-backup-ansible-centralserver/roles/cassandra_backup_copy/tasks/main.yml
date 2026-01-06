@@ -1,0 +1,25 @@
+---
+- name: Get snapshot paths from all nodes
+  shell: |
+    find {{ hostvars[item]['cassandra_data_dir'] }}/*/*/snapshots/{{ snapshot_id }} -type d 2>/dev/null || true
+  register: snapshot_paths
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['cassandra_nodes'] }}"
+  changed_when: false
+
+- name: Process and copy snapshots from each node
+  include_tasks: copy_from_node.yml
+  loop: "{{ groups['cassandra_nodes'] }}"
+  loop_control:
+    loop_var: node_name
+  vars:
+    node_snapshot_paths: "{{ snapshot_paths.results | selectattr('item', 'equalto', node_name) | map(attribute='stdout_lines') | first }}"
+
+- name: Log backup completion
+  lineinfile:
+    path: "{{ log_file }}"
+    line: |
+      ==========================================
+      All snapshots successfully copied to Central Server: {{ backup_base_dir }}
+      ==========================================
+    insertafter: EOF

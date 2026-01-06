@@ -1,0 +1,42 @@
+---
+- name: Get list of all keyspaces when keyspace=all
+  shell: |
+    cqlsh -e "SELECT keyspace_name FROM system_schema.keyspaces;" | grep -v "^$" | grep -v "keyspace_name" | grep -v "^-" | grep -v "^(" | awk '{print $1}' | grep -v "^system"
+  register: all_keyspaces
+  when: keyspace == 'all'
+  changed_when: false
+
+- name: Display keyspaces to be backed up
+  debug:
+    msg: "Will backup these keyspaces: {{ all_keyspaces.stdout_lines }}"
+  when: keyspace == 'all'
+
+- name: Take snapshot for each non-system keyspace
+  shell: "nodetool snapshot -t {{ snapshot_id }} {{ item }}"
+  loop: "{{ all_keyspaces.stdout_lines }}"
+  register: snapshot_result_all
+  when: keyspace == 'all' and all_keyspaces.stdout_lines | length > 0
+  changed_when: snapshot_result_all.rc == 0
+  failed_when: snapshot_result_all.rc != 0
+
+- name: Take snapshot for specific keyspace
+  shell: "nodetool snapshot -t {{ snapshot_id }} {{ keyspace }}"
+  register: snapshot_result_ks
+  when: keyspace != 'all'
+  changed_when: snapshot_result_ks.rc == 0
+  failed_when: snapshot_result_ks.rc != 0
+
+- name: Log snapshot success
+  debug:
+    msg: "Successfully created snapshot {{ snapshot_id }} on {{ inventory_hostname }} for keyspace: {{ keyspace }}"
+
+- name: Verify snapshot was created
+  shell: |
+    find {{ cassandra_data_dir }}/*/*/snapshots/{{ snapshot_id }} -type d 2>/dev/null | head -1
+  register: verify_snapshot
+  failed_when: verify_snapshot.stdout == ""
+  changed_when: false
+
+- name: Display snapshot verification
+  debug:
+    msg: "Snapshot verified on {{ inventory_hostname }}: {{ verify_snapshot.stdout_lines }}"

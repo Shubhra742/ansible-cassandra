@@ -1,0 +1,16 @@
+---
+- name: Check if node has snapshots
+  debug:
+    msg: "Processing node {{ node_name }} - Found {{ node_snapshot_paths | length }} snapshot directories"
+
+- name: Process each snapshot directory from node
+  include_tasks: copy_single_snapshot.yml
+  loop: "{{ node_snapshot_paths }}"
+  loop_control:
+    loop_var: snapshot_dir
+  when: node_snapshot_paths | length > 0
+
+- name: Warn if no snapshots found
+  debug:
+    msg: "WARNING: No snapshot directories found on {{ node_name }} for snapshot ID {{ snapshot_id }}"
+  when: node_snapshot_paths | length == 0

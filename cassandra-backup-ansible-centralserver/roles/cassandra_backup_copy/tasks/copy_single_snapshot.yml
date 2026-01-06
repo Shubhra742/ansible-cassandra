@@ -1,0 +1,61 @@
+---
+- name: Extract keyspace and table information
+  set_fact:
+    keyspace_name: "{{ snapshot_dir.split('/')[-4] }}"
+    table_dir: "{{ snapshot_dir.split('/')[-3] }}"
+    table_name: "{{ snapshot_dir.split('/')[-3] | regex_replace('-[^-]*$', '') }}"
+    node_ip: "{{ hostvars[node_name]['ansible_host'] }}"
+
+# NEW: Skip system keyspaces
+- name: Check if keyspace is a system keyspace
+  set_fact:
+    is_system_keyspace: "{{ keyspace_name.startswith('system') or keyspace_name in ['OpsCenter', 'dse_system', 'dse_security', 'dse_perf', 'dse_leases', 'solr_admin', 'HiveMetaStore'] }}"
+
+- name: Skip system keyspace
+  debug:
+    msg: "Skipping system keyspace: {{ keyspace_name }}"
+  when: is_system_keyspace | bool
+
+# Only proceed if NOT a system keyspace
+- block:
+  - name: Set local backup path
+    set_fact:
+      local_backup_path: "{{ backup_base_dir }}/node-{{ node_ip }}/{{ backup_date }}/{{ backup_time }}/{{ keyspace_name }}/{{ table_name }}-{{ snapshot_id }}"
+  
+  - name: Create local backup directory
+    file:
+      path: "{{ local_backup_path }}"
+      state: directory
+      mode: '0755'
+  
+  - name: Log copy operation start
+    debug:
+      msg: "Copying snapshot data from {{ node_name }} ({{ node_ip }}) - {{ keyspace_name }}.{{ table_name }}"
+  
+  - name: Copy snapshot data using rsync with timeout
+    shell: |
+      timeout 300 rsync -avz --compress --timeout=60 \
+        -e "ssh -i {{ hostvars[node_name]['ansible_ssh_private_key_file'] }} -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes" \
+        {{ hostvars[node_name]['ansible_user'] }}@{{ node_ip }}:{{ snapshot_dir }}/ \
+        {{ local_backup_path }}/
+    register: copy_result
+    changed_when: copy_result.rc == 0
+    failed_when: copy_result.rc != 0 and copy_result.rc != 124
+    async: 330
+    poll: 5
+  
+  - name: Log successful copy
+    lineinfile:
+      path: "{{ log_file }}"
+      line: "Successfully copied snapshot for {{ keyspace_name }}.{{ table_name }} from {{ node_name }} ({{ node_ip }}) to {{ local_backup_path }}"
+      insertafter: EOF
+    when: copy_result.rc == 0
+  
+  - name: Log timeout or failed copy
+    lineinfile:
+      path: "{{ log_file }}"
+      line: "FAILED/TIMEOUT to copy snapshot for {{ keyspace_name }}.{{ table_name }} from {{ node_name }} ({{ node_ip }}) - RC: {{ copy_result.rc }}"
+      insertafter: EOF
+    when: copy_result.rc != 0
+
+  when: not (is_system_keyspace | bool)
