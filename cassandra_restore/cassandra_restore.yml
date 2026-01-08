@@ -1,0 +1,397 @@
+---
+- name: Cassandra Restore Automation
+  hosts: cassandra_nodes
+  vars_prompt:
+    - name: local_snapshot_path
+      prompt: "Enter LOCAL path to Backup Snapshot Directory (e.g. /home/user/backup_cassandra/node-<ip>/date/time/all)"
+      private: no
+
+    - name: remote_snapshot_base
+      prompt: "Enter REMOTE directory where backup should be copied (e.g. /home/ubuntu/cassandra_backups)"
+      private: no
+      default: "/home/ubuntu/cassandra_backups"
+
+    - name: vm_choice
+      prompt: "Choose restoration scenario:\n1. Restoration on Different VM\n2. Restoration on Same VM\nEnter your choice (1 or 2)"
+      private: no
+
+    - name: restore_mode
+      prompt: "Choose restoration mode (only for Different VM):\n1. Complete database restoration\n2. Selected keyspace restoration\nEnter your choice (1 or 2, or press Enter to skip)"
+      private: no
+      default: "1"
+
+    - name: cassandra_ip
+      prompt: "Enter Cassandra IP (e.g. 172.31.42.5)"
+      private: no
+
+    - name: cql_user
+      prompt: "Enter Cassandra username"
+      private: no
+
+    - name: cql_pass
+      prompt: "Enter Cassandra password"
+      private: yes
+
+    - name: replication_clause
+      prompt: "Enter full keyspace replication clause (e.g., WITH replication = {'class': 'NetworkTopologyStrategy', 'dc1': '3'} AND durable_writes = true;)"
+      private: no
+
+    - name: orig_keyspace
+      prompt: "Enter original keyspace name (only for Same VM scenario, or press Enter to skip)"
+      private: no
+      default: ""
+
+    - name: orig_table
+      prompt: "Enter original table name (only for Same VM scenario, or press Enter to skip)"
+      private: no
+      default: ""
+
+    - name: new_keyspace
+      prompt: "Enter NEW keyspace name (only for Same VM scenario, or press Enter to skip)"
+      private: no
+      default: ""
+
+    - name: new_table
+      prompt: "Enter NEW table name (only for Same VM scenario, or press Enter to skip)"
+      private: no
+      default: ""
+
+    - name: selected_keyspace
+      prompt: "Enter keyspace to restore (only for Selected keyspace mode, or press Enter to skip)"
+      private: no
+      default: ""
+
+  vars:
+    data_dir: "/var/lib/cassandra/data"
+    cassandra_user: "cassandra"
+    cassandra_group: "cassandra"
+    log_dir: "/tmp/cassandra_restore_log"
+    restore_script_path: "/tmp/cassandra_restore.sh"
+    snapshot_path: "{{ remote_snapshot_base }}/{{ local_snapshot_path | basename }}"
+    system_keyspaces:
+      - "system"
+      - "system_auth"
+      - "system_distributed"
+      - "system_schema"
+      - "system_traces"
+
+  tasks:
+    - name: Check if local backup directory exists
+      local_action:
+        module: stat
+        path: "{{ local_snapshot_path }}"
+      register: local_backup
+      become: no
+
+    - name: Fail if local backup directory does not exist
+      fail:
+        msg: "Local backup directory {{ local_snapshot_path }} does not exist!"
+      when: not local_backup.stat.exists
+
+    - name: Create remote backup base directory
+      file:
+        path: "{{ remote_snapshot_base }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        mode: '0755'
+      become: yes
+
+    - name: Copy backup from local to remote server
+      synchronize:
+        src: "{{ local_snapshot_path }}/"
+        dest: "{{ snapshot_path }}/"
+        delete: no
+        recursive: yes
+      become: no
+
+    - name: Display backup copy status
+      debug:
+        msg: "Backup copied successfully to {{ snapshot_path }}"
+
+    - name: Create log directory
+      file:
+        path: "{{ log_dir }}"
+        state: directory
+        mode: '0777'
+      become: no
+
+    - name: Copy restore script to remote host
+      copy:
+        content: |
+          #!/bin/bash
+          
+          set -euo pipefail
+          
+          DATE=$(date +%Y%m%d)
+          TIME=$(date +%H%M%S)
+          LOG_DIR="{{ log_dir }}"
+          LOG_FILE="$LOG_DIR/restore_${DATE}_${TIME}.log"
+          exec > >(tee -a "$LOG_FILE") 2>&1
+          
+          DATA_DIR="{{ data_dir }}"
+          CASSANDRA_USER="{{ cassandra_user }}"
+          CASSANDRA_GROUP="{{ cassandra_group }}"
+          SYSTEM_KS=({{ system_keyspaces | join(' ') }})
+          
+          SNAPSHOT_PATH="{{ snapshot_path }}"
+          VM_CHOICE="{{ vm_choice }}"
+          RESTORE_MODE="{{ restore_mode }}"
+          CASSANDRA_IP="{{ cassandra_ip }}"
+          CQL_USER="{{ cql_user }}"
+          CQL_PASS="{{ cql_pass }}"
+          REPLICATION_CLAUSE="{{ replication_clause }}"
+          ORIG_KS="{{ orig_keyspace }}"
+          ORIG_TBL="{{ orig_table }}"
+          NEW_KS="{{ new_keyspace }}"
+          NEW_TBL="{{ new_table }}"
+          SEL_KS="{{ selected_keyspace }}"
+          
+          if [[ ! -d "$SNAPSHOT_PATH" ]]; then
+              echo "Backup Snapshot Directory '$SNAPSHOT_PATH' does not exist."
+              exit 1
+          fi
+          
+          run_cql() {
+              local CQL_ERR_LOG="/tmp/cql_err_$$.log"
+              sudo cqlsh "$CASSANDRA_IP" -u "$CQL_USER" -p "$CQL_PASS" -e "$1" 2>"$CQL_ERR_LOG" || {
+                  echo "Failed to connect to Cassandra or execute CQL."
+                  cat "$CQL_ERR_LOG"
+                  rm -f "$CQL_ERR_LOG"
+                  exit 1
+              }
+              rm -f "$CQL_ERR_LOG"
+          }
+          
+          restore_table() {
+              local SNAPSHOT_DIR="$1"
+              local NEW_KS="$2"
+              local NEW_TBL="$3"
+          
+              local SCHEMA_FILE="$SNAPSHOT_DIR/schema.cql"
+              if [[ ! -f "$SCHEMA_FILE" ]]; then
+                  echo "schema.cql missing in $SNAPSHOT_DIR"
+                  return
+              fi
+          
+              # Extract original keyspace and table name from schema.cql
+              # Handle: CREATE TABLE [IF NOT EXISTS] keyspace.table or "keyspace"."table"
+              local ORIG_KS=$(grep 'CREATE TABLE' "$SCHEMA_FILE" | sed -E 's/CREATE TABLE( IF NOT EXISTS)?\s+"?([^."]+)"?\."?([^".([:space:]]+)"?.*/\2/' | head -n1)
+              local ORIG_TBL=$(grep 'CREATE TABLE' "$SCHEMA_FILE" | sed -E 's/CREATE TABLE( IF NOT EXISTS)?\s+"?([^."]+)"?\."?([^".([:space:]]+)"?.*/\3/' | head -n1)
+          
+              if [[ -z "$ORIG_KS" || -z "$ORIG_TBL" ]]; then
+                  echo "Could not extract keyspace/table from schema.cql in $SNAPSHOT_DIR"
+                  cat "$SCHEMA_FILE"
+                  return
+              fi
+          
+              echo "=========================================="
+              echo "Found table: $ORIG_KS.$ORIG_TBL in $SNAPSHOT_DIR"
+              echo "Target: $NEW_KS.$NEW_TBL"
+              echo "=========================================="
+              
+              echo "Step 1: Creating keyspace $NEW_KS if not exists..."
+              run_cql "CREATE KEYSPACE IF NOT EXISTS \"$NEW_KS\" $REPLICATION_CLAUSE"
+              echo "✓ Keyspace created/verified"
+          
+              local TMP_CQL="/tmp/create_${NEW_KS}_${NEW_TBL}.cql"
+              awk '
+                  BEGIN { skip=0 }
+                  /^CREATE TABLE/ { skip=1; print; next }
+                  /^\)/ && skip { print ");"; exit }
+                  skip { print }
+              ' "$SCHEMA_FILE" | sed "s/${ORIG_KS}\.${ORIG_TBL}/${NEW_KS}.${NEW_TBL}/g" > "$TMP_CQL"
+          
+              echo "Step 2: Creating table $NEW_KS.$NEW_TBL..."
+              echo "Generated CQL:"
+              cat "$TMP_CQL"
+              
+              sudo cqlsh "$CASSANDRA_IP" -u "$CQL_USER" -p "$CQL_PASS" -f "$TMP_CQL" 2>&1 || {
+                  echo "Warning: Failed to create table $NEW_KS.$NEW_TBL (might already exist)"
+              }
+              echo "✓ Table created/verified"
+          
+              # Wait for table to be created
+              sleep 2
+              
+              echo "Step 3: Finding table directory..."
+              local NEW_TABLE_DIR=$(find "$DATA_DIR/$NEW_KS" -maxdepth 1 -type d -name "${NEW_TBL}-*" 2>/dev/null | head -1)
+              if [[ -z "$NEW_TABLE_DIR" ]]; then
+                  echo "ERROR: Could not locate table directory for $NEW_KS.$NEW_TBL"
+                  echo "Available directories in $DATA_DIR/$NEW_KS:"
+                  sudo ls -la "$DATA_DIR/$NEW_KS/" 2>/dev/null || echo "Keyspace directory not found"
+                  return
+              fi
+              echo "✓ Found table directory: $NEW_TABLE_DIR"
+          
+              echo "Step 4: Copying SSTables..."
+              echo "From: $SNAPSHOT_DIR"
+              echo "To: $NEW_TABLE_DIR"
+              
+              # Copy only SSTable files, not schema.cql or manifest.json
+              for file in "$SNAPSHOT_DIR"/*.db "$SNAPSHOT_DIR"/*.txt "$SNAPSHOT_DIR"/*.crc32; do
+                  if [[ -f "$file" ]]; then
+                      sudo cp "$file" "$NEW_TABLE_DIR/" 2>&1 || echo "Warning: Could not copy $file"
+                  fi
+              done
+              
+              sudo chown -R "$CASSANDRA_USER:$CASSANDRA_GROUP" "$NEW_TABLE_DIR"
+              echo "✓ SSTables copied"
+              
+              echo "Step 5: Listing copied files..."
+              sudo ls -lh "$NEW_TABLE_DIR/"
+          
+              echo "Step 6: Running nodetool refresh (instead of import)..."
+              sudo nodetool refresh "$NEW_KS" "$NEW_TBL" 2>&1 || {
+                  echo "Refresh failed, trying nodetool import..."
+                  sudo nodetool import "$NEW_KS" "$NEW_TBL" "$NEW_TABLE_DIR" 2>&1 || {
+                      echo "ERROR: Both refresh and import failed for $NEW_KS.$NEW_TBL"
+                      echo "Checking nodetool status:"
+                      sudo nodetool status 2>&1
+                      return
+                  }
+              }
+              echo "✓ Data loaded successfully"
+          
+              echo "Step 7: Verifying data..."
+              sudo cqlsh "$CASSANDRA_IP" -u "$CQL_USER" -p "$CQL_PASS" -e "SELECT COUNT(*) FROM ${NEW_KS}.${NEW_TBL};" 2>&1 || echo "Could not verify count"
+              
+              echo "=========================================="
+              echo "✓ Successfully restored $NEW_KS.$NEW_TBL"
+              echo "=========================================="
+          }
+          
+          # =====================
+          # Scenario 1: Different VM
+          # =====================
+          if [[ "$VM_CHOICE" == "1" ]]; then
+              if [[ "$RESTORE_MODE" == "1" ]]; then
+                  echo "Starting complete database restoration..."
+                  for snapshot_dir in "$SNAPSHOT_PATH"/*-snapshot_*; do
+                      if [[ ! -d "$snapshot_dir" ]]; then
+                          continue
+                      fi
+                      
+                      # Extract keyspace from schema.cql
+                      if [[ -f "$snapshot_dir/schema.cql" ]]; then
+                          ks=$(grep 'CREATE TABLE' "$snapshot_dir/schema.cql" | sed -E 's/CREATE TABLE( IF NOT EXISTS)?\s+"?([^."]+)"?\."?([^".([:space:]]+)"?.*/\2/' | head -n1)
+                          tbl=$(basename "$snapshot_dir" | sed 's/-snapshot_.*//')
+                          
+                          if [[ " ${SYSTEM_KS[*]} " =~ " $ks " ]]; then
+                              echo "Skipping system keyspace: $ks"
+                              continue
+                          fi
+                          
+                          echo "Restoring $ks.$tbl..."
+                          restore_table "$snapshot_dir" "$ks" "$tbl"
+                      fi
+                  done
+          
+              elif [[ "$RESTORE_MODE" == "2" ]]; then
+                  if [[ -z "$SEL_KS" ]]; then
+                      echo "No keyspace specified for selected keyspace restoration!"
+                      exit 1
+                  fi
+          
+                  echo "Restoring keyspace: $SEL_KS"
+                  for snapshot_dir in "$SNAPSHOT_PATH"/*-snapshot_*; do
+                      if [[ ! -d "$snapshot_dir" ]]; then
+                          continue
+                      fi
+                      
+                      if [[ -f "$snapshot_dir/schema.cql" ]]; then
+                          ks=$(grep 'CREATE TABLE' "$snapshot_dir/schema.cql" | sed -E 's/CREATE TABLE( IF NOT EXISTS)?\s+"?([^."]+)"?\."?([^".([:space:]]+)"?.*/\2/' | head -n1)
+                          tbl=$(basename "$snapshot_dir" | sed 's/-snapshot_.*//')
+                          
+                          if [[ "$ks" == "$SEL_KS" ]]; then
+                              echo "Restoring $ks.$tbl..."
+                              restore_table "$snapshot_dir" "$ks" "$tbl"
+                          fi
+                      fi
+                  done
+              else
+                  echo "Invalid restoration mode!"
+                  exit 1
+              fi
+          
+          # =====================
+          # Scenario 2: Same VM
+          # =====================
+          elif [[ "$VM_CHOICE" == "2" ]]; then
+              if [[ -z "$ORIG_KS" || -z "$ORIG_TBL" || -z "$NEW_KS" || -z "$NEW_TBL" ]]; then
+                  echo "Missing parameters for Same VM restoration!"
+                  exit 1
+              fi
+          
+              # Find the snapshot directory for the original table
+              found=0
+              for snapshot_dir in "$SNAPSHOT_PATH"/*-snapshot_*; do
+                  if [[ ! -d "$snapshot_dir" ]]; then
+                      continue
+                  fi
+                  
+                  if [[ -f "$snapshot_dir/schema.cql" ]]; then
+                      ks=$(grep 'CREATE TABLE' "$snapshot_dir/schema.cql" | sed -E 's/CREATE TABLE( IF NOT EXISTS)?\s+"?([^."]+)"?\."?([^".([:space:]]+)"?.*/\2/' | head -n1)
+                      tbl=$(basename "$snapshot_dir" | sed 's/-snapshot_.*//')
+                      
+                      if [[ "$ks" == "$ORIG_KS" && "$tbl" == "$ORIG_TBL" ]]; then
+                          echo "Found snapshot for $ORIG_KS.$ORIG_TBL"
+                          restore_table "$snapshot_dir" "$NEW_KS" "$NEW_TBL"
+                          found=1
+                          break
+                      fi
+                  fi
+              done
+              
+              if [[ $found -eq 0 ]]; then
+                  echo "Could not find snapshot for $ORIG_KS.$ORIG_TBL"
+                  exit 1
+              fi
+          
+          else
+              echo "Invalid VM option!"
+              exit 1
+          fi
+          
+          echo "=========================================="
+          echo "Restore completed successfully!"
+          echo "=========================================="
+        dest: "{{ restore_script_path }}"
+        mode: '0755'
+      become: no
+
+    - name: Verify snapshot directory exists on remote host
+      stat:
+        path: "{{ snapshot_path }}"
+      register: snapshot_dir
+
+    - name: Fail if snapshot directory does not exist on remote
+      fail:
+        msg: "Snapshot directory {{ snapshot_path }} does not exist on remote host after copy!"
+      when: not snapshot_dir.stat.exists
+
+    - name: Execute restore script
+      shell: "{{ restore_script_path }}"
+      register: restore_output
+      async: 7200
+      poll: 10
+      become: no
+
+    - name: Display restore output
+      debug:
+        var: restore_output.stdout_lines
+
+    - name: Check for restore errors
+      fail:
+        msg: "Restore failed! Check the logs at {{ log_dir }}"
+      when: restore_output.rc != 0
+
+    - name: Display log file location
+      debug:
+        msg: "Restore logs are available at {{ log_dir }}/restore_*.log"
+
+    - name: Cleanup restore script
+      file:
+        path: "{{ restore_script_path }}"
+        state: absent
+      when: restore_output.rc == 0
+      become: no
