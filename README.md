@@ -4,7 +4,7 @@ Complete automation suite for Apache Cassandra 4.1.x deployment and management.
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 cassandra-ansible/
@@ -22,7 +22,7 @@ cassandra-ansible/
 
 ---
 
-## 🚀 Quick Start Guide
+## Quick Start Guide
 
 ### 1. Single-Node Installation
 
